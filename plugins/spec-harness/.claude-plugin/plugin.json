@@ -1,0 +1,10 @@
+{
+  "name": "spec-harness",
+  "description": "Executa specs Markdown produzidas pela skill SDD: um packet unificado por spec e um autorun que encadeia RED -> GREEN -> VERIFY em subagentes, dentro de um git worktree com enforcement de path.",
+  "version": "1.0.0",
+  "author": {
+    "name": "VitorMRCNeves",
+    "url": "https://github.com/VitorMRCNeves"
+  },
+  "homepage": "https://github.com/VitorMRCNeves/Spec-Harness"
+}

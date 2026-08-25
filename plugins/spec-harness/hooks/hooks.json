@@ -1,0 +1,17 @@
+{
+  "description": "Path scoping das specs: bloqueia leitura/escrita fora de capabilities.*.paths enquanto uma fase de spec está aberta.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/engine/hook-guard.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

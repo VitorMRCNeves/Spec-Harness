@@ -6,8 +6,13 @@ allowed-tools: [Read, Glob, Grep, Bash, Write, Edit]
 
 # SDD Spec Harness
 
-Etapa operacional da skill 'sdd'. Não cria uma segunda definição da feature: a spec Markdown
-continua sendo a fonte da verdade.
+Etapa operacional da skill `sdd`, que vem no mesmo plugin: ela quebra a entrega em specs
+construíveis, esta aqui as implementa. Não crie uma segunda definição da feature — a spec
+Markdown continua sendo a fonte da verdade.
+
+Se a pasta `.specs/sdd-<feature>/` ainda não existir, não improvise um packet: rode `/sdd`
+primeiro. E se `.claude/sdd/perfil.md` existir, leia-o — ele descreve as camadas e os padrões do
+repositório que os prompts de RED e GREEN vão cobrar.
 
 Ambiente: ative o ambiente do repositório (ver `CLAUDE.md`/`AGENTS.md` dele) antes de qualquer
 teste ou lint — o harness herda o ambiente da sessão que o invoca. Em

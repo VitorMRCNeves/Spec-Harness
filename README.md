@@ -1,12 +1,49 @@
 # Spec-Harness
 
-Plugin do Claude Code que **executa** specs Markdown (as que a skill `sdd` produz) com
-enforcement mecânico: cada spec vira um git worktree isolado, é implementada em
-**RED → GREEN → VERIFY** por sessões headless, e só chega em `ready_for_review` se passar por
-gates determinísticos — path scoping, comando de teste, lint, CRAP e revisão automática.
+Plugin do Claude Code com **duas skills que se encadeiam**:
+
+| Skill | O que faz |
+|---|---|
+| **`sdd`** | Quebra uma entrega em **specs construíveis** — cada uma é a menor mudança que dá para implementar e provar com teste, com contrato explícito e casos de aceite verificáveis |
+| **`spec-harness`** | **Executa** cada spec com enforcement mecânico: um git worktree isolado, **RED → GREEN → VERIFY** em sessões headless, e `ready_for_review` só depois dos gates |
 
 O ponto não é gerar código: é que quem orquestra **não precisa ler o diff** para saber que a
 mudança está dentro do escopo declarado, que o teste existiu antes do código e que o lint passou.
+
+```
+entrega vaga ──sdd──> .specs/sdd-<feature>/specs/NN-*.md ──spec-harness──> branch com commits por fase
+```
+
+---
+
+## `sdd` — quebrar a entrega em specs construíveis
+
+Uma "entrega" (um ticket, um pedido do time, uma ideia) quase nunca é implementável de uma vez:
+tem contrato indefinido, escopo elástico e critérios de aceite implícitos. A skill `sdd` a
+transforma numa sequência de specs em que cada uma **cabe num ciclo de teste**.
+
+O fluxo é por fases, e cada uma existe para matar uma classe de erro:
+
+| Fase | O que faz | Erro que evita |
+|---|---|---|
+| **-2 Setup** | Na **primeira execução no repositório**: escaneia o projeto (documentação de agente, manifesto, estrutura real via `git ls-files`, testes, CI, rastreador de issues), pergunta o que não conseguir inferir e grava `.claude/sdd/perfil.md` | Spec que propõe uma arquitetura que não é a do repositório |
+| **-1 Ticket + grilling** | Busca o ticket, se houver referência, e entrevista até a ideia estar afiada | Spec construída sobre premissa errada |
+| **0 Alinhamento** | Objetivo, regras de negócio, não-objetivos, integrações | Escopo elástico |
+| **1 Exploração** | Descobre o **shape real** de contratos e schemas no código | Fixture com campo inventado — o erro mais caro |
+| **2 Investigação** | Levanta padrões e precedentes do repositório | Reimplementar o que já existe |
+| **3 Confirmação** | Deriva a lista de specs e confirma o recorte | Spec grande demais para ser provada |
+| **4 Geração** | Escreve `.specs/sdd-<slug>/` | — |
+
+A saída é uma pasta com `descricao_alto_nivel.md`, `implementacao.md`, `progresso.md` e
+`specs/NN-<nome>.md` — cada spec com requisitos (RF), casos de borda (EC), casos de teste (T),
+contratos e a seção `## Arquivos permitidos`, que é exatamente o que o `spec-harness` lê para
+montar o packet da spec.
+
+**O perfil do repositório (`.claude/sdd/perfil.md`) é o que torna a skill portátil.** Ele guarda
+tipo de projeto, camadas e fronteiras, o que conta como "uma spec" ali, padrões obrigatórios,
+níveis de teste exigidos e integrações recorrentes. É gerado uma vez, versionado com o repo, e
+refeito com `--setup`. Sem ele, as fases seguintes produziriam specs genéricas demais para serem
+implementáveis.
 
 ---
 
@@ -58,6 +95,13 @@ node ~/.claude/spec_harness/harness.ts init-repo   # detecta o perfil e escreve 
 node ~/.claude/spec_harness/harness.ts doctor      # o que ainda falta, campo a campo
 ```
 
+Para planejar a entrega (gera as specs; na primeira vez roda o setup do repositório):
+
+```
+/sdd <descrição da entrega | chave do ticket>
+/sdd --setup     # refaz o perfil do repositório, quando a estrutura mudar
+```
+
 Depois, uma spec por vez:
 
 ```bash
@@ -101,9 +145,15 @@ plugins/spec-harness/
     tools/crap_calculator.py
 ```
 
-**O perfil é do repositório, não do plugin.** `init-repo` escreve
-`.claude/spec_harness/harness.config.json` no repo alvo, e é lá que ficam escopos, extensões,
-validadores, comando de teste, CRAP e revisão automática. Versione esse arquivo com o repo.
+**Os dois perfis são do repositório, não do plugin** — e ambos devem ser versionados com ele:
+
+| Arquivo | Quem escreve | O que guarda |
+|---|---|---|
+| `.claude/spec_harness/harness.config.json` | `harness.ts init-repo` | Escopos, extensões, validadores, comando de teste, CRAP, revisão automática |
+| `.claude/sdd/perfil.md` | Fase -2 da skill `sdd` | Tipo de projeto, camadas, unidade de entrega, padrões obrigatórios, níveis de teste, integrações |
+
+Eles se reforçam: se o harness já foi inicializado, a Fase -2 do `sdd` lê os `scopes` dele em vez
+de perguntar de novo — escopo declarado num é escopo no outro.
 
 ### O que o `init-repo` detecta sozinho
 
@@ -116,7 +166,14 @@ incompleta não passa despercebida.
 
 ---
 
-## As fases
+## `spec-harness` — executar cada spec
+
+Cada spec vira um packet (`scaffold-packet` lê a própria spec: IDs RF/EC/T, arquivos permitidos,
+escopo) e o `autorun` a implementa em três fases dentro de um worktree só dela. O que sai é uma
+branch `spec/<feature>/<NN>` com um commit por fase aprovada, evidência em JSON por fase e os
+artefatos de revisão.
+
+### As fases
 
 | Fase | Escreve | Gate |
 |---|---|---|
@@ -128,7 +185,7 @@ A fase VERIFY **não abre sessão de modelo**: ela não escreve nada, e seus val
 rodados pelo próprio motor — uma sessão ali só gastaria tokens para observar um resultado já
 produzido.
 
-### CRAP (determinístico)
+#### CRAP (determinístico)
 
 Depois do commit do VERIFY, o motor roda a suíte do **escopo** com relatório JSON de cobertura e
 pontua `complexidade² × (1 − cobertura)³ + complexidade` **apenas nas funções de produção que a
@@ -137,7 +194,7 @@ spec alterou**. O resumo vai para a evidência e o top-N entra no prompt do code
 CRAP é **sinal, não alvo**: um teste sem `assert` derruba o número igual a um teste bom. Por isso
 nenhuma sessão de modelo recebe "reduza o CRAP" como tarefa.
 
-### Revisão automática pós-VERIFY
+#### Revisão automática pós-VERIFY
 
 Roda uma vez por spec (marcador `.post-verify.json`): um agente de code review — que recebe a
 spec, o diff e o top-N de CRAP — e, se o plugin `cognitive-loop` estiver disponível, o
@@ -194,7 +251,17 @@ sobrevivem, porque estão no repo.
 Numa base com dívida acumulada, ligá-los como gate por fase reprova specs por problema alheio. O
 template deixa `null` e documenta; ligue quando a base sustentar.
 
-**10. `verify-packet` avulso não substitui revisão.**
+**10. O perfil do `sdd` envelhece.**
+`.claude/sdd/perfil.md` é uma fotografia do repositório no dia em que foi gerado. Quando a
+estrutura mudar, rode `/sdd --setup` — a Fase 2 avisa se encontrar contradição entre o perfil e o
+código, mas ela só roda dentro de um SDD.
+
+**11. A skill `sdd` depende de uma skill de grilling para a Fase -1.**
+Sem uma instalada (ex.: `grilling`, do plugin `mattpocock-skills`), ela conduz a entrevista
+sozinha, em rounds — funciona, mas é mais fraco que a skill dedicada. A busca de ticket é
+opcional e delegada ao que existir no ambiente (skill do rastreador, MCP ou `gh`).
+
+**12. `verify-packet` avulso não substitui revisão.**
 `ready_for_review` quer dizer "os gates mecânicos passaram", não "está aprovado". Os campos de
 `manual_review` (contract, forbidden.behaviors, review.focus) existem para a leitura humana, e o
 PR do repositório continua com os gates dele.

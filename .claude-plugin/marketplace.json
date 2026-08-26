@@ -1,6 +1,6 @@
 {
   "name": "spec-harness",
-  "description": "SDD Spec Harness — execução de specs Markdown com enforcement de path, TDD encadeado e revisão automática",
+  "description": "SDD Spec Harness — quebra entregas em specs construíveis (skill `sdd`) e as implementa com enforcement de path, TDD encadeado e revisão automática (skill `spec-harness`)",
   "owner": {
     "name": "VitorMRCNeves",
     "url": "https://github.com/VitorMRCNeves"
@@ -8,11 +8,18 @@
   "plugins": [
     {
       "name": "spec-harness",
-      "description": "Executa specs SDD em RED->GREEN->VERIFY dentro de worktrees isolados, com gates determinísticos, CRAP e revisão automática pós-VERIFY",
+      "description": "Planeja e executa: `sdd` gera as specs a partir da entrega, `spec-harness` roda cada uma em RED->GREEN->VERIFY num worktree isolado, com gates determinísticos, CRAP e revisão automática",
       "source": "./plugins/spec-harness",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "category": "development",
-      "tags": ["sdd", "tdd", "spec", "worktree", "code-review"]
+      "tags": [
+        "sdd",
+        "tdd",
+        "spec",
+        "worktree",
+        "code-review",
+        "planning"
+      ]
     }
   ]
 }

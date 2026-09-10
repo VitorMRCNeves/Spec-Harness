@@ -187,12 +187,16 @@ produzido.
 
 #### CRAP (determinístico)
 
-Depois do commit do VERIFY, o motor roda a suíte do **escopo** com relatório JSON de cobertura e
-pontua `complexidade² × (1 − cobertura)³ + complexidade` **apenas nas funções de produção que a
-spec alterou**. O resumo vai para a evidência e o top-N entra no prompt do code review.
+Depois do commit do VERIFY, o motor roda a suíte do **escopo** com cobertura de linhas e branches
+e pontua `complexidade² × (1 − cobertura)³ + complexidade` **apenas nas funções de produção cujas
+linhas aparecem no diff da spec**. O gate padrão é composto e bloqueante: CRAP máximo 30, CRAP máximo 15 para função
+nova, complexidade máxima 15, coberturas de linha e branch mínimas de 90% e nenhum aumento de
+CRAP normalizado contra a complexidade do baseline.
 
-CRAP é **sinal, não alvo**: um teste sem `assert` derruba o número igual a um teste bom. Por isso
-nenhuma sessão de modelo recebe "reduza o CRAP" como tarefa.
+A medição é fail-closed: relatório ausente/desatualizado, arquivo pulado, suíte com erro,
+cobertura sem resumo exato por função ou teste do RED com hash divergente bloqueiam o VERIFY.
+Falha de complexidade aponta para GREEN; insuficiência de branch coverage aponta para revisão do
+RED; falha da medição aponta para infraestrutura. O agente não recebe "reduza o CRAP" como meta.
 
 #### Revisão automática pós-VERIFY
 

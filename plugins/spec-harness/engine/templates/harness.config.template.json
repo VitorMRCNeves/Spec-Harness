@@ -63,17 +63,27 @@
     }
   },
   "crap": {
-    "_comment": "Etapa determinística de risco rodada no VERIFY, depois do commit da fase e ANTES da revisão automática: pontua CRAP ((comp^2 * (1-cov)^3) + comp) só nas funções dos arquivos de PRODUÇÃO que a spec alterou. Nenhuma sessão de modelo. CRAP é gameável por teste sem assert, então aqui é sinal para o code review (via {crap_top}) e série histórica na evidência — nunca alvo de otimização de um agente. Requer `radon` e `pytest-cov` (ou equivalente que gere JSON do coverage.py) no ambiente que roda o harness; sem eles o passo fica inconclusivo, com aviso, e nunca aprova silenciosamente. Para desligar: enabled=false.",
+    "_comment": "Gate composto e fail-closed sobre funções de produção alteradas. CRAP não trabalha sozinho: há teto independente de complexidade, cobertura de branch, limite mais estrito para função nova, delta normalizado contra a complexidade do baseline e vínculo criptográfico aos testes aprovados no RED. O agente recebe a causa da reprovação, nunca a missão genérica de baixar CRAP.",
     "enabled": true,
-    "gate": "warn",
-    "_gate_comment": "warn = função acima do limiar entra na evidência e no prompt do code review. block = reprova o VERIFY.",
+    "gate": "block",
+    "_gate_comment": "block = qualquer violação ou medição inconclusiva reprova o VERIFY.",
     "threshold": 30,
+    "max_new_crap": 15,
+    "max_complexity": 15,
+    "min_line_coverage": 90,
+    "min_branch_coverage": 90,
+    "max_crap_delta": 0,
+    "require_function_summaries": true,
+    "require_timestamp": true,
+    "require_red_test_hash": true,
+    "fail_on_skipped_files": true,
+    "fail_on_inconclusive": true,
     "top_n": 5,
     "tool": "tools/crap_calculator.py",
     "python": "python",
     "timeout_ms": 900000,
-    "coverage_command": "pytest -q -p no:cacheprovider --cov=. --cov-report=json:{coverage_json} --cov-fail-under=0 {test_targets}",
-    "_coverage_command_comment": "Roda no worktree da spec, herdando o ambiente da sessão. O denominador é a suíte do ESCOPO, não o test_command da spec: medir cobertura só pelos testes da spec inflaria o CRAP de código que a suíte já cobre. TODO: ajuste o comando ao runner deste repo (precisa de --cov e de um relatório JSON do coverage.py em {coverage_json}).",
+    "coverage_command": "pytest -q -p no:cacheprovider --cov=. --cov-branch --cov-report=json:{coverage_json} --cov-fail-under=0 {test_targets}",
+    "_coverage_command_comment": "Roda a suíte do ESCOPO e exige branch coverage. TODO: ajuste ao runner do repo preservando {coverage_json}, {test_targets} e o equivalente a --cov-branch.",
     "scope_tests": {
       "_comment": "Alvos de pytest por escopo. Ausente = derivado dos scopes.paths (<prefixo>/tests quando existe, ou o próprio prefixo quando já é de teste)."
     }

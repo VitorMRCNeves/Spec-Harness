@@ -144,17 +144,18 @@ exato. Os caminhos possíveis:
 - **a spec está errada**: pare. Corrigir a spec é decisão sua, não do implementador — e não
   afrouxe `contract`/`forbidden.behaviors` do packet para passar o gate.
 
-## CRAP pós-VERIFY (determinístico, sem modelo)
+## Gate composto de CRAP pós-VERIFY (determinístico, sem modelo)
 
-Antes da revisão automática, o harness roda a suíte do escopo com relatório JSON de cobertura e
-pontua CRAP (`complexidade² × (1-cobertura)³ + complexidade`) **só nas funções de produção que a
-spec alterou**. Nenhuma sessão de modelo. Artefatos: `crap.json`/`coverage.json` no diretório de
-revisão, resumo no campo `crap` da evidência e o top-N injetado no prompt do code review como
-`{crap_top}`.
+Antes da revisão automática, o harness roda a suíte do escopo com cobertura de linhas e branches
+e pontua CRAP (`complexidade² × (1-cobertura)³ + complexidade`) **só nas funções de produção cujas
+linhas aparecem no diff da spec**. O gate padrão é `block` e combina CRAP por função, teto independente de
+complexidade, limite mais estrito para função nova, branch coverage e delta normalizado contra o
+baseline. Os hashes gravados no RED provam que os testes usados no VERIFY não mudaram.
 
-Gate `warn` por padrão (`crap.gate`, `crap.threshold`). É sinal para a revisão, não alvo de
-otimização: CRAP cai igual com teste sem `assert`, então nenhum agente recebe "baixe o CRAP" como
-tarefa. Detalhes e casos inconclusivos em `references/verify.md#crap-fase-verify-determinístico`.
+Relatório ausente/desatualizado, suíte com erro, arquivo pulado ou cobertura sem resumo exato por
+função são inconclusivos e bloqueiam. A evidência indica `required_action`: `green` para reduzir
+complexidade, `red` para cobertura insuficiente e `infrastructure` para medição inválida. Nenhum
+agente recebe "baixe o CRAP" como tarefa. Detalhes em `references/verify.md`.
 
 ## Revisão automática pós-VERIFY
 

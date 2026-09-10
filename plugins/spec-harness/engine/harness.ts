@@ -200,6 +200,16 @@ interface CrapConfig {
   enabled?: boolean;
   gate?: "warn" | "block";
   threshold?: number;
+  max_new_crap?: number;
+  max_complexity?: number;
+  min_line_coverage?: number;
+  min_branch_coverage?: number;
+  max_crap_delta?: number;
+  require_function_summaries?: boolean;
+  require_timestamp?: boolean;
+  require_red_test_hash?: boolean;
+  fail_on_skipped_files?: boolean;
+  fail_on_inconclusive?: boolean;
   top_n?: number;
   tool?: string;
   python?: string;
@@ -212,7 +222,12 @@ interface ScaffoldConfig {
   test_command_template?: string;
 }
 
+interface DocsConfig {
+  por_fase?: Partial<Record<Phase, string[]>>;
+}
+
 interface HarnessConfig {
+  docs?: DocsConfig;
   scaffold?: ScaffoldConfig;
   scopes?: Record<string, { paths?: string[] } | string>;
   source_extensions?: string[];
@@ -229,6 +244,20 @@ interface CrapFunction {
   crap: number;
   comp: number;
   cov: number;
+  branch_cov?: number | null;
+  new?: boolean;
+  baseline_comp?: number | null;
+  baseline_crap_at_current_coverage?: number | null;
+  crap_delta?: number | null;
+}
+
+interface CrapViolation {
+  kind: string;
+  required_action: "green" | "red" | "infrastructure";
+  file: string;
+  name: string;
+  actual: number;
+  limit: number;
 }
 
 interface CrapReport {
@@ -236,6 +265,8 @@ interface CrapReport {
   average_crap?: number;
   high_risk_functions?: CrapFunction[];
   fallback_functions?: number;
+  skipped_files?: string[];
+  violations?: CrapViolation[];
 }
 
 interface CrapSummary {
@@ -249,7 +280,9 @@ interface CrapSummary {
   total_functions: number;
   average_crap: number;
   high_risk: CrapFunction[];
+  violations: CrapViolation[];
   errors: string[];
+  required_action?: "green" | "red" | "infrastructure";
   note?: string;
 }
 
@@ -353,7 +386,16 @@ function postVerifyConfig(): PostVerifyConfig {
 }
 
 function crapConfig(): CrapConfig {
-  return CFG().crap ?? {};
+  return {
+    gate: "block",
+    threshold: 30,
+    max_new_crap: 15,
+    max_complexity: 15,
+    min_line_coverage: 90,
+    min_branch_coverage: 90,
+    max_crap_delta: 0,
+    ...(CFG().crap ?? {}),
+  };
 }
 
 // Comando de teste que o scaffold escreve no packet. Fica na config porque é a única parte do
@@ -958,6 +1000,11 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
   }
 
   const gatesOk = errors.length === 0;
+  const changedFileHashes = Object.fromEntries(
+    changed
+      .filter((f) => fs.existsSync(path.join(worktree, f)) && fs.statSync(path.join(worktree, f)).isFile())
+      .map((f) => [f, sha256(path.join(worktree, f))])
+  );
   const evidence = {
     packet: packetPath,
     run_id: run.run_id,
@@ -966,6 +1013,7 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
     branch: run.branch,
     worktree: run.worktree,
     changed_files: changed,
+    changed_file_hashes: changedFileHashes,
     validation_results: validationResults,
     global_validation_results: globalResults,
     blocked_tool_calls: blocked,
@@ -1013,7 +1061,7 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
     const extraErrors: string[] = [];
     const reviewDir = reviewDirFor(packet);
 
-    const crap = runCrapStep(packet, run, reviewDir, quiet);
+    const crap = runCrapStep(packet, packetPath, run, reviewDir, quiet);
     if (crap) {
       extra.crap = crap.summary;
       extraErrors.push(...crap.errors);
@@ -1080,7 +1128,7 @@ async function cmdVerifyPacket(args: string[]): Promise<void> {
 
 // Os arquivos pontuados são os da spec INTEIRA (diff base...branch), não os da fase corrente: na
 // fase VERIFY o baseline é tirado depois do commit do GREEN, então o `changed` da fase é vazio.
-function crapScoredFiles(app: string, branch: string): string[] {
+function crapScoredFiles(app: string, branch: string, worktree: string): string[] {
   const base = gitOut(["merge-base", currentBranch(), branch]) || currentBranch();
   const diff = gitOut(["diff", "--name-only", `${base}...${branch}`]);
   const prefixes = scopePaths(app);
@@ -1093,7 +1141,8 @@ function crapScoredFiles(app: string, branch: string): string[] {
         f &&
         prefixes.some((prefix) => f.startsWith(prefix)) &&
         exts.some((e) => f.endsWith(e)) &&
-        !looksLikeTestPath(f)
+        !looksLikeTestPath(f) &&
+        fs.existsSync(path.join(worktree, f))
     );
 }
 
@@ -1132,6 +1181,15 @@ function crapTopText(reviewDir: string): string {
   if (!report) {
     return "(sem relatório de CRAP nesta execução — ignore este critério)";
   }
+  const violations = (report.violations ?? []).slice(0, crapConfig().top_n ?? 5);
+  if (violations.length) {
+    return violations
+      .map(
+        (v) =>
+          `- ${v.file} -> ${v.name}() — ${v.kind}: ${v.actual.toFixed(2)} (limite ${v.limit}, ação ${v.required_action})`
+      )
+      .join("\n");
+  }
   const top = (report.high_risk_functions ?? []).slice(0, crapConfig().top_n ?? 5);
   if (!top.length) {
     return `(nenhuma função acima do limiar de CRAP; média ${(report.average_crap ?? 0).toFixed(2)} em ${report.total_functions ?? 0} função(ões) alterada(s))`;
@@ -1144,8 +1202,94 @@ function crapTopText(reviewDir: string): string {
     .join("\n");
 }
 
+function materializeCrapBaseline(scored: string[], branch: string, key: string): string {
+  const base = gitOut(["merge-base", currentBranch(), branch]) || currentBranch();
+  const dir = path.join(HARNESS_HOME, "crap-baselines", key.replace(/\//g, "-"), base);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  for (const rel of scored) {
+    const source = spawnSync("git", ["-C", REPO_ROOT, "show", `${base}:${rel}`], {
+      encoding: "utf-8",
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    if (source.status !== 0) continue; // arquivo novo; ausência no baseline é informação útil.
+    const dst = path.join(dir, rel);
+    if (!isWithin(dst, dir)) die(`path de baseline fora do diretório esperado: ${rel}`);
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.writeFileSync(dst, source.stdout ?? "", "utf-8");
+  }
+  return dir;
+}
+
+function writeChangedLineRanges(scored: string[], branch: string, reviewDir: string): string {
+  const base = gitOut(["merge-base", currentBranch(), branch]) || currentBranch();
+  const ranges: Record<string, Array<[number, number]>> = {};
+  for (const rel of scored) {
+    const diff = spawnSync(
+      "git",
+      ["-C", REPO_ROOT, "diff", "--unified=0", `${base}...${branch}`, "--", rel],
+      { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
+    );
+    if (diff.status !== 0) die(`não foi possível calcular linhas alteradas de ${rel}`);
+    const fileRanges: Array<[number, number]> = [];
+    for (const line of (diff.stdout ?? "").split("\n")) {
+      const match = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+      if (!match) continue;
+      const start = Number(match[1]);
+      const count = match[2] === undefined ? 1 : Number(match[2]);
+      if (count > 0) fileRanges.push([start, start + count - 1]);
+      else fileRanges.push([Math.max(1, start - 1), Math.max(1, start)]); // remoção pura: ancora nas vizinhas.
+    }
+    ranges[rel] = fileRanges;
+  }
+  const out = path.join(reviewDir, "crap-linhas-alteradas.json");
+  fs.writeFileSync(out, JSON.stringify(ranges, null, 2), "utf-8");
+  return out;
+}
+
+function verifyRedTestHashes(packetPath: string, worktree: string): string[] {
+  const cfg = crapConfig();
+  if (!(cfg.require_red_test_hash ?? cfg.gate === "block")) return [];
+  const redEvidence = path.join(
+    path.dirname(packetPath),
+    path.basename(packetPath).replace(/-verify\.yaml$/, "-red.evidence.json")
+  );
+  if (!fs.existsSync(redEvidence)) {
+    return [`evidência RED ausente para validar hashes dos testes: ${redEvidence}`];
+  }
+  try {
+    const evidence = JSON.parse(fs.readFileSync(redEvidence, "utf-8")) as {
+      changed_files?: string[];
+      changed_file_hashes?: Record<string, string>;
+      status?: string;
+    };
+    const hashes = evidence.changed_file_hashes ?? {};
+    const testFiles = (evidence.changed_files ?? []).filter(looksLikeTestPath);
+    if (evidence.status !== "ready_for_review" || !testFiles.length) {
+      return ["evidência RED não contém testes aprovados para vincular à cobertura"];
+    }
+    const errors: string[] = [];
+    for (const rel of testFiles) {
+      const full = path.join(worktree, rel);
+      if (!hashes[rel] || !fs.existsSync(full) || sha256(full) !== hashes[rel]) {
+        errors.push(`teste do RED alterado depois da aprovação: ${rel}`);
+      }
+    }
+    return errors;
+  } catch (err) {
+    return [`evidência RED inválida: ${String(err)}`];
+  }
+}
+
+function crapRequiredAction(violations: CrapViolation[]): "green" | "red" | undefined {
+  if (violations.some((v) => v.required_action === "red")) return "red";
+  if (violations.some((v) => v.required_action === "green")) return "green";
+  return undefined;
+}
+
 function runCrapStep(
   packet: Packet,
+  packetPath: string,
   run: RunState,
   reviewDir: string,
   quiet: boolean
@@ -1153,7 +1297,7 @@ function runCrapStep(
   const cfg = crapConfig();
   if (!cfg.enabled || !cfg.coverage_command || !cfg.tool) return null;
 
-  const scored = crapScoredFiles(packet.app ?? "", run.branch);
+  const scored = crapScoredFiles(packet.app ?? "", run.branch, run.worktree);
   if (!scored.length) return null;
 
   const gate = cfg.gate ?? "warn";
@@ -1171,12 +1315,33 @@ function runCrapStep(
     total_functions: 0,
     average_crap: 0,
     high_risk: [],
+    violations: [],
     errors: [],
   };
+
+  const failOnInconclusive = cfg.fail_on_inconclusive ?? gate === "block";
+  const requireFunctionSummaries = cfg.require_function_summaries ?? gate === "block";
+  const requireTimestamp = cfg.require_timestamp ?? gate === "block";
+  const failOnSkippedFiles = cfg.fail_on_skipped_files ?? gate === "block";
+  const redHashErrors = verifyRedTestHashes(packetPath, run.worktree);
+  if (redHashErrors.length) {
+    const msg = redHashErrors.join("; ");
+    summary.note = msg;
+    summary.required_action = "red";
+    if (gate === "block") {
+      errors.push(msg);
+      summary.errors.push(msg);
+    }
+  }
 
   if (!testTargets.length) {
     summary.note = `escopo '${packet.app}' não tem diretório de testes conhecido — configure crap.scope_tests`;
     if (!quiet) console.log(`  AVISO (crap): ${summary.note}`);
+    if (failOnInconclusive) {
+      errors.push(summary.note);
+      summary.errors.push(summary.note);
+      summary.required_action = "infrastructure";
+    }
     return { summary, errors };
   }
 
@@ -1204,20 +1369,46 @@ function runCrapStep(
   summary.coverage_returncode = cov.code;
   summary.coverage_json = coverageJson;
 
+  if (cov.code !== 0 && failOnInconclusive) {
+    const msg = `suíte de cobertura terminou com exit ${cov.code}; CRAP não é evidência válida`;
+    errors.push(msg);
+    summary.errors.push(msg);
+    summary.required_action = "infrastructure";
+  }
+
   if (!fs.existsSync(coverageJson)) {
     summary.note =
       `o relatório de cobertura não foi gerado (exit ${cov.code}) — CRAP inconclusivo. ` +
       `Saída: ${(cov.stdout + cov.stderr).slice(-600)}`;
     if (!quiet) console.log(`  AVISO (crap): relatório de cobertura não gerado (exit ${cov.code}).`);
+    if (failOnInconclusive && !errors.includes(summary.note)) {
+      errors.push(summary.note);
+      summary.errors.push(summary.note);
+      summary.required_action = "infrastructure";
+    }
     return { summary, errors };
   }
 
   const python = cfg.python ?? "python";
   const tool = resolveEnginePath(cfg.tool!);
+  const baselineDir = materializeCrapBaseline(scored, run.branch, run.key);
+  const changedLinesJson = writeChangedLineRanges(scored, run.branch, reviewDir);
+  const option = (flag: string, value: number | undefined): string =>
+    value === undefined ? "" : ` ${flag} ${value}`;
   const toolCmd =
     `${python} ${JSON.stringify(tool)} --coverage-json ${JSON.stringify(coverageJson)} ` +
     `--source-dir ${JSON.stringify(run.worktree)} --only-from ${JSON.stringify(listFile)} ` +
-    `--threshold ${threshold} --json-out ${JSON.stringify(crapJson)}`;
+    `--baseline-source-dir ${JSON.stringify(baselineDir)} ` +
+    `--changed-lines-json ${JSON.stringify(changedLinesJson)} ` +
+    `--threshold ${threshold} --json-out ${JSON.stringify(crapJson)}` +
+    option("--max-new-crap", cfg.max_new_crap) +
+    option("--max-complexity", cfg.max_complexity) +
+    option("--min-line-coverage", cfg.min_line_coverage) +
+    option("--min-branch-coverage", cfg.min_branch_coverage) +
+    option("--max-crap-delta", cfg.max_crap_delta) +
+    (requireFunctionSummaries ? " --require-function-summaries" : "") +
+    (requireTimestamp ? " --require-timestamp" : "") +
+    (failOnSkippedFiles ? " --fail-on-skipped-files" : "");
   const toolRun = runCmd(toolCmd, run.worktree, cfg.timeout_ms ?? 900_000);
   const report = readCrapReport(reviewDir);
 
@@ -1226,6 +1417,11 @@ function runCrapStep(
       `o crap_calculator não produziu relatório (exit ${toolRun.code}) — CRAP inconclusivo. ` +
       `Saída: ${(toolRun.stdout + toolRun.stderr).slice(-600)}`;
     if (!quiet) console.log(`  AVISO (crap): ${summary.note}`);
+    if (failOnInconclusive) {
+      errors.push(summary.note);
+      summary.errors.push(summary.note);
+      summary.required_action = "infrastructure";
+    }
     return { summary, errors };
   }
 
@@ -1233,6 +1429,11 @@ function runCrapStep(
   summary.total_functions = report.total_functions ?? 0;
   summary.average_crap = report.average_crap ?? 0;
   summary.high_risk = report.high_risk_functions ?? [];
+  summary.violations = report.violations ?? [];
+  const gateAction = crapRequiredAction(summary.violations);
+  if (summary.required_action !== "infrastructure" && gateAction) {
+    summary.required_action = gateAction;
+  }
 
   if (!quiet) {
     console.log(
@@ -1244,11 +1445,16 @@ function runCrapStep(
         `    ${f.file} -> ${f.name}() CRAP ${f.crap.toFixed(2)} (comp ${f.comp}, cov ${f.cov.toFixed(1)}%)`
       );
     }
+    for (const v of summary.violations.slice(0, cfg.top_n ?? 5)) {
+      console.log(
+        `    gate ${v.kind}: ${v.file} -> ${v.name}() valor ${v.actual.toFixed(2)}, limite ${v.limit} (ação: ${v.required_action})`
+      );
+    }
   }
 
-  if (summary.high_risk.length) {
+  if (summary.violations.length) {
     const msg =
-      `${summary.high_risk.length} função(ões) alterada(s) com CRAP > ${threshold} — ` +
+      `${summary.violations.length} violação(ões) no gate composto de CRAP — ` +
       `ver ${summary.report}`;
     if (gate === "block") {
       errors.push(msg);
@@ -2159,6 +2365,50 @@ function autorunLogDir(key: string): string {
 // Sessão headless que implementa UMA fase dentro do worktree da spec. O modelo aqui é o barato
 // (sonnet por padrão): o contexto dele é o packet daquela fase, e o hook PreToolUse do harness
 // continua valendo porque o cwd é o worktree com execução ativa.
+// A documentação do repositório é lida sob demanda pela sessão da fase, e é o item mais caro do
+// contexto: reler os oito docs do apps-dados custa ~36k tokens, que o cache reenvia em TODO turno
+// da fase — na spec 01 de movimentação BTG isso foi ~70% de 30,5M tokens. A allowlist diz a cada
+// fase quais docs importam para ela: RED só escreve teste e não precisa do doc de deploy nem do de
+// admin. Sem `docs.por_fase` no perfil, nada é injetado e o prompt fica como era.
+function blocoDeDocsDaFase(phase: Phase): string {
+  const docs = CFG().docs?.por_fase?.[phase];
+  if (!docs?.length) return "";
+  return (
+    "\n\nDocumentação a ler NESTA fase (e só ela):\n  - " +
+    docs.join("\n  - ") +
+    "\nOs demais arquivos de `docs/` estão fora do escopo desta fase — não os abra. " +
+    "Em arquivo grande, use grep/sed na seção relevante em vez de ler o arquivo inteiro."
+  );
+}
+
+// Falha de ambiente não é enigma a resolver. Na spec 01 de movimentação BTG o comando de teste
+// saiu 127 (o wrapper estava no .gitignore, então não existia no worktree) e a sessão gastou 67
+// turnos e 8,9M tokens — 29% do custo da spec inteira — rodando `find /`, `git ls-files` e
+// `cat pytest.ini` atrás do arquivo. O modelo não tem como consertar isso de dentro do worktree:
+// quem monta o worktree é o harness. Abortar cedo devolve o controle a quem pode corrigir.
+const BLOCO_FALHA_DE_AMBIENTE =
+  "\n\nSe o comando de teste sair 126 ou 127 (comando não encontrado / sem permissão), ou se o " +
+  "runner reclamar de arquivo do próprio harness que não existe: PARE imediatamente e responda " +
+  "só o comando e o código de saída. Isso é falha do harness montando o worktree, não da sua " +
+  "implementação — você não tem como corrigir daqui. NÃO procure o arquivo, não rode `find`, não " +
+  "invente comando alternativo, não instale nada.";
+
+// Os arquivos que a sessão precisa ler para acertar o padrão do repositório. Sem isso a fase
+// descobre sozinha onde as coisas ficam: na spec 01 foram ~64 chamadas de Read/Grep/Glob/ls só
+// para orientação, e cada fase pagou de novo porque RED, GREEN e VERIFY não compartilham contexto.
+// `capabilities.read.paths` é permissão ("você PODE ler"), o que é diferente de instrução
+// ("leia ISTO, é o padrão a seguir") — daí o bloco sair de `required_reads`.
+function blocoDeArquivosDeReferencia(packet: Packet): string {
+  const reads = (packet.required_reads ?? []).filter(Boolean);
+  if (!reads.length) return "";
+  return (
+    "\n\nLeia estes arquivos ANTES de explorar o repositório por conta própria — são a spec e o " +
+    "padrão a seguir:\n  - " +
+    reads.join("\n  - ") +
+    "\nSe depois deles ainda faltar contexto, explore; mas não comece pela exploração."
+  );
+}
+
 function runImplementer(
   phase: Phase,
   packet: Packet,
@@ -2180,7 +2430,7 @@ function runImplementer(
     read_paths: (packet.capabilities?.read?.paths ?? []).join("\n  - "),
     test_command: (packet.validation?.commands ?? [])[0]?.run ?? "",
     feedback: feedback || "(primeira tentativa — nenhum gate reprovado ainda)",
-  });
+  }) + blocoDeArquivosDeReferencia(packet) + blocoDeDocsDaFase(phase) + BLOCO_FALHA_DE_AMBIENTE;
 
   const args = [
     "-p",
@@ -2538,7 +2788,7 @@ function detectaPerfil(): Deteccao {
     ? {
         enabled: true,
         coverage_command:
-          `pytest -q -p no:cacheprovider --cov=${raiz} --cov-report=json:{coverage_json} ` +
+          `pytest -q -p no:cacheprovider --cov=${raiz} --cov-branch --cov-report=json:{coverage_json} ` +
           "--cov-fail-under=0 {test_targets}",
       }
     : { enabled: false };
@@ -2728,6 +2978,21 @@ interface Problema {
 
 // `npx <pkg>` resolve o pacote em node_modules/.bin, que não está no PATH da sessão: o que
 // precisa existir é o npx.
+function gitRastreia(rel: string): boolean {
+  const r = spawnSync("git", ["-C", REPO_ROOT, "ls-files", "--error-unmatch", rel], { stdio: "ignore" });
+  return r.status === 0;
+}
+
+// `applyWorktreeExtras` copia/linka caminhos inteiros, então um arquivo é coberto tanto pela sua
+// própria entrada quanto pela do diretório que o contém.
+function copiadoParaOWorktree(rel: string): boolean {
+  const extras = [...(CFG().worktree?.copy_paths ?? []), ...(CFG().worktree?.link_paths ?? [])];
+  return extras.some((e) => {
+    const norm = e.replace(/\/+$/, "");
+    return rel === norm || rel.startsWith(`${norm}/`);
+  });
+}
+
 function binarioDoComando(cmd: string): string {
   return cmd.trim().split(/\s+/)[0];
 }
@@ -2779,6 +3044,23 @@ function diagnostico(): Problema[] {
     add("ERRO", "scaffold.test_command_template", "não contém {test_paths} — o comando ignoraria os testes da spec.");
   } else if (!temBinario(binarioDoComando(tmpl))) {
     add("ERRO", "scaffold.test_command_template", `binário '${binarioDoComando(tmpl)}' não está no PATH desta sessão.`);
+  } else {
+    // O worktree da spec nasce da BRANCH, não da árvore de trabalho: um comando de teste que
+    // aponta para arquivo do repo não rastreado pelo git simplesmente não existe lá, e a fase
+    // morre com exit 127. Foi o que aconteceu na spec 01 de movimentação BTG — `.claude/` estava
+    // no .gitignore — e custou 67 turnos de busca antes de alguém perceber. `copy_paths` e
+    // `link_paths` são a saída legítima para o que é da máquina (um .env), então valem como
+    // cobertura.
+    const bin = binarioDoComando(tmpl);
+    const doRepo = !path.isAbsolute(bin) && bin.includes("/") && fs.existsSync(path.join(REPO_ROOT, bin));
+    if (doRepo && !gitRastreia(bin) && !copiadoParaOWorktree(bin)) {
+      add(
+        "ERRO",
+        "scaffold.test_command_template",
+        `'${bin}' existe aqui mas não é rastreado pelo git nem está em worktree.copy_paths/link_paths — ` +
+          "o worktree da spec nasce da branch, então a fase sairia 127. Versione o arquivo ou declare-o em worktree.copy_paths."
+      );
+    }
   }
 
   const validadores = globalValidators();
@@ -2818,13 +3100,43 @@ function diagnostico(): Problema[] {
     }
   }
 
-  const crap = cfg.crap ?? {};
+  const crap = crapConfig();
   if (crap.enabled) {
     const tool = crap.tool ? resolveEnginePath(crap.tool) : null;
     if (!tool || !fs.existsSync(tool)) add("ERRO", "crap.tool", `ferramenta não encontrada: ${crap.tool ?? "(vazio)"}`);
     const cov = crap.coverage_command ?? "";
     for (const marca of ["{coverage_json}", "{test_targets}"]) {
       if (!cov.includes(marca)) add("ERRO", "crap.coverage_command", `não contém ${marca}.`);
+    }
+    if (crap.min_branch_coverage !== undefined && !/--cov-branch|--branch\b/.test(cov)) {
+      add(
+        "ERRO",
+        "crap.coverage_command",
+        "min_branch_coverage exige medição de branches (--cov-branch/--branch)."
+      );
+    }
+    for (const [campo, valor] of [
+      ["threshold", crap.threshold],
+      ["max_new_crap", crap.max_new_crap],
+      ["max_complexity", crap.max_complexity],
+      ["min_line_coverage", crap.min_line_coverage],
+      ["min_branch_coverage", crap.min_branch_coverage],
+    ] as Array<[string, number | undefined]>) {
+      if (valor !== undefined && (!Number.isFinite(valor) || valor < 0)) {
+        add("ERRO", `crap.${campo}`, "deve ser um número não negativo.");
+      }
+    }
+    for (const campo of ["min_line_coverage", "min_branch_coverage"] as const) {
+      const valor = crap[campo];
+      if (valor !== undefined && valor > 100) {
+        add("ERRO", `crap.${campo}`, "não pode ser maior que 100.");
+      }
+    }
+    if (crap.max_complexity !== undefined && !Number.isInteger(crap.max_complexity)) {
+      add("ERRO", "crap.max_complexity", "deve ser um número inteiro.");
+    }
+    if (crap.max_crap_delta !== undefined && !Number.isFinite(crap.max_crap_delta)) {
+      add("ERRO", "crap.max_crap_delta", "deve ser um número finito.");
     }
     if (!pythonImporta("radon")) add("ERRO", "crap", "`radon` não importável — instale-o ou desligue crap.enabled.");
     if (!pythonImporta("pytest_cov")) add("ERRO", "crap", "`pytest-cov` não importável — instale-o ou desligue crap.enabled.");
@@ -2837,6 +3149,16 @@ function diagnostico(): Problema[] {
       if (!job.prompt) add("ERRO", `post_verify.${job.id}`, "job sem prompt.");
       for (const d of [...(job.add_dirs ?? []), ...(job.plugin_dirs ?? [])]) {
         if (!fs.existsSync(d)) add("ERRO", `post_verify.${job.id}`, `diretório declarado não existe: ${d}`);
+      }
+    }
+  }
+
+  // A allowlist só ajuda se apontar para arquivo que existe: um caminho podre vira instrução para
+  // ler algo inexistente, e a sessão gasta turnos procurando.
+  for (const [fase, docs] of Object.entries(cfg.docs?.por_fase ?? {})) {
+    for (const rel of docs ?? []) {
+      if (!fs.existsSync(path.join(REPO_ROOT, rel))) {
+        add("ERRO", `docs.por_fase.${fase}`, `arquivo declarado não existe: ${rel}`);
       }
     }
   }

@@ -36,31 +36,34 @@ Cada execução também acrescenta uma linha JSON em
 `${SPEC_HARNESS_METRICS_FILE}` ou `/tmp/spec_harness/metrics.jsonl` com
 arquivos alterados, chamadas bloqueadas e totais de validação.
 
-## CRAP (fase VERIFY, determinístico)
+## Gate composto de CRAP (fase VERIFY, determinístico)
 
 Depois do commit da fase VERIFY e **antes** da revisão automática, o harness mede risco nas
 funções de produção que a spec alterou (diff `base...spec/<feature>/<NN>`, não o diff da fase):
 
-1. roda a suíte do **escopo** com `--cov-report=json` (`crap.coverage_command`, alvos de
+1. roda a suíte do **escopo** com branch coverage e `--cov-report=json` (`crap.coverage_command`, alvos de
    `crap.scope_tests` ou derivados de `scopes.paths`) — o denominador é a suíte do app, não o
    `test_command` da spec, que infla o CRAP de código já coberto;
-2. chama `~/.claude/spec_harness/tools/crap_calculator.py` com `--only-from` restrito a esses
-   arquivos: `CRAP = complexidade² × (1 − cobertura)³ + complexidade`. Exige `radon` e um plugin de
-   cobertura que gere JSON do coverage.py no ambiente do repo.
+2. materializa do merge-base apenas os fontes alterados e usa sua complexidade como baseline;
+3. chama `~/.claude/spec_harness/tools/crap_calculator.py` com `--only-from` restrito a esses
+   arquivos: `CRAP = complexidade² × (1 − cobertura)³ + complexidade`. O delta aplica a mesma
+   cobertura final às duas complexidades, para não comparar suítes diferentes.
 
-Artefatos em `.specs/sdd-<feature>/reviews/<NN>/`: `crap.json` e `crap-arquivos.txt` (o
+Artefatos em `.specs/sdd-<feature>/reviews/<NN>/`: `crap.json`, `crap-arquivos.txt` e
+`crap-linhas-alteradas.json` (o
 `coverage.json` bruto, >1 MB, fica em `/tmp/spec_harness/coverage/<feature>-<NN>.json`). O resumo
 (média, funções acima do limiar, alvos usados) vai para o campo `crap` da evidência, e o top-N
 entra no prompt do code review como `{crap_top}`.
 
-O gate é `warn` por padrão: função acima de `crap.threshold` (30) vira aviso e pista de revisão.
-Com `crap.gate: "block"`, ela grava `status: review_blocked` e reprova o VERIFY. Cobertura não
-gerada, `crap.json` ausente ou escopo sem diretório de testes = **inconclusivo** (campo `note`),
-nunca aprovação silenciosa.
+O perfil padrão bloqueia se qualquer função exceder CRAP 30; função nova exceder CRAP 15;
+complexidade exceder 15 (função legada pode manter, mas não aumentar, um baseline maior);
+cobertura de linha ou branch ficar abaixo de 90%; ou o CRAP normalizado piorar. O hash dos testes
+aprovados no RED é revalidado antes da medição.
 
-CRAP é sinal, não alvo: um teste sem `assert` derruba o número igual a um teste bom. Por isso
-nenhuma sessão de modelo recebe "reduza o CRAP" como tarefa — quem lê o número é o code review e
-você.
+O gate é fail-closed: suíte com exit não zero, relatório ausente/desatualizado, arquivo ausente ou
+pulado, fallback por linhas e branch coverage indisponível reprovam o VERIFY. A evidência roteia a
+correção: `green` para complexidade/CRAP, `red` para cobertura e `infrastructure` para medição
+inválida. O agente recebe a causa concreta, nunca a meta genérica de baixar o número.
 
 ## Revisão automática (fase VERIFY)
 

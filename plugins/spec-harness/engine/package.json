@@ -11,6 +11,7 @@
   "name": "spec-harness",
   "description": "Motor de enforcement da skill spec-harness (rodar com: node .claude/spec_harness/harness.ts)",
   "scripts": {
-    "typecheck": "tsc --noEmit --project tsconfig.json"
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "test:crap": "python -m unittest discover -s tests -v"
   }
 }

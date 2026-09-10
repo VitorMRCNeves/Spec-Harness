@@ -1,0 +1,67 @@
+schema_version: 2
+unified: true
+feature: bench
+spec_number: 1
+app: calc
+source_spec: .specs/sdd-bench/specs/01-normalizar-valor.md
+
+# Além da spec, os arquivos-referência do padrão: `formatador.py` é o caminho de ida do mesmo
+# domínio (Decimal -> texto) e o teste dele é o formato de teste do repositório. Estão aqui, e
+# não só em context_paths, porque `required_reads` é o que o harness manda para a sessão como
+# INSTRUÇÃO de leitura — context_paths seria só permissão.
+required_reads:
+  - .specs/sdd-bench/specs/01-normalizar-valor.md
+  - calc/formatador.py
+  - calc/tests/test_formatador.py
+
+# Os três docs entram como PERMISSÃO de leitura. Quem restringe é a allowlist `docs.por_fase` do
+# perfil, e é justamente esse o contraste que o bench mede: com a allowlist desligada a sessão tem
+# permissão para os três e decide sozinha; com ela ligada, recebe a instrução de qual ler por fase.
+# Sem os três aqui, a allowlist do GREEN apontaria para um arquivo que o hook bloquearia.
+context_paths:
+  - docs/conventions.md
+  - docs/commands.md
+  - docs/catalogo.md
+
+test_paths:
+  - calc/tests/test_valor.py
+
+impl_paths:
+  - calc/valor.py
+
+test_command: pytest -q -p no:cacheprovider calc/tests/test_valor.py
+
+red_expects: new_module
+missing_module: calc.valor
+
+verifies:
+  requirements:
+    [RF-01, RF-02, RF-03, RF-04, RF-05, EC-01, EC-02, EC-03,
+     T-01, T-02, T-03, T-04, T-05]
+
+phases:
+  red: {}
+  green: {}
+  verify:
+    extra_commands:
+      - id: suite_completa
+        run: pytest -q -p no:cacheprovider calc
+        required_result: pass
+
+enforcement:
+  blocked_tool_calls: review
+
+manual_review:
+  contract:
+    must:
+      - "normalizar_valor devolve Decimal com escala 2 em todo caminho de sucesso."
+      - "Entrada inválida levanta ValueError; nenhuma exceção da stdlib (InvalidOperation) vaza."
+    must_not:
+      - "Usar float em qualquer ponto do caminho do valor."
+  forbidden:
+    behaviors:
+      - "Aceitar em silêncio uma string que não é número, devolvendo Decimal('0')."
+  review:
+    focus:
+      - "O arredondamento é ROUND_HALF_UP explícito, não o default do Decimal (ROUND_HALF_EVEN)?"
+      - "A separação entre milhar e decimal funciona para entrada sem milhar e sem decimal?"

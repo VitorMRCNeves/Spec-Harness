@@ -1,0 +1,75 @@
+{
+  "rotulo": "retomada",
+  "cota": 91208,
+  "config": {
+    "docs": "lazy",
+    "allowlist": "on",
+    "autorun_exit": "0"
+  },
+  "segundos": 153.0,
+  "sessoes": 1,
+  "turnos": 18,
+  "tokens": {
+    "input_tokens": 36,
+    "cache_read_input_tokens": 573543,
+    "cache_creation_input_tokens": 73277,
+    "output_tokens": 17895,
+    "total": 664751
+  },
+  "contexto_medio_por_turno": 36931,
+  "ferramentas": {
+    "Read": 7,
+    "<texto>": 3,
+    "Bash": 3,
+    "Write": 2
+  },
+  "gates": {
+    "avaliacoes": 3,
+    "reprovadas": 0,
+    "por_fase": {
+      "red": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      },
+      "green": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      },
+      "verify": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      }
+    }
+  },
+  "qualidade": {
+    "disponivel": false
+  },
+  "por_sessao": [
+    {
+      "arquivo": "b3332a65-2d6f-48ed-bc43-64abd054f2d8.jsonl",
+      "turnos": 18,
+      "cota": 91208,
+      "tokens": {
+        "input_tokens": 36,
+        "cache_read_input_tokens": 573543,
+        "cache_creation_input_tokens": 73277,
+        "output_tokens": 17895,
+        "total": 664751
+      },
+      "contexto": {
+        "primeiro": 31751,
+        "ultimo": 44413,
+        "maximo": 44413,
+        "medio": 35936
+      },
+      "ferramentas": {
+        "Read": 7,
+        "<texto>": 3,
+        "Bash": 3,
+        "Write": 2
+      },
+      "inicio": "2026-09-11T01:19:01.985Z",
+      "fim": "2026-09-11T01:21:01.245Z"
+    }
+  ]
+}

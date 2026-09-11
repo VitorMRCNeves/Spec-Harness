@@ -79,7 +79,7 @@ git -C "$REPO" config user.name  bench
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm "fixture do bench do spec-harness"
 
-echo "=== bench '$ROTULO'  docs=$DOCS  allowlist=$ALLOWLIST ==="
+echo "=== bench '$ROTULO'  docs=$DOCS  allowlist=$ALLOWLIST  sessao=$SESSAO ==="
 echo "repo:    $REPO"
 echo "home:    $SPEC_HARNESS_HOME"
 
@@ -109,9 +109,9 @@ SAIDA="$BENCH_DIR/runs/$ROTULO.json"
 [[ $DRY -eq 1 ]] && SAIDA="$SANDBOX/dry.json"
 
 python3 "$BENCH_DIR/metrics.py" coletar \
-  --home "$SPEC_HARNESS_HOME" --worktree "$WORKTREE" --repo "$WORKTREE" \
+  --home "$SPEC_HARNESS_HOME" --worktree "$WORKTREE" --repo "$REPO" \
   --desde "$DESDE" --ate "$ATE" --rotulo "$ROTULO" \
-  --extra "docs=$DOCS" "allowlist=$ALLOWLIST" "autorun_exit=$CODIGO" \
+  --extra "docs=$DOCS" "allowlist=$ALLOWLIST" "sessao=$SESSAO" "autorun_exit=$CODIGO" \
   --saida "$SAIDA"
 
 if [[ $MANTER -eq 1 ]]; then

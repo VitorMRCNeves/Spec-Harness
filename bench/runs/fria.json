@@ -1,0 +1,101 @@
+{
+  "rotulo": "fria",
+  "cota": 261581,
+  "config": {
+    "docs": "lazy",
+    "allowlist": "on",
+    "autorun_exit": "0"
+  },
+  "segundos": 127.0,
+  "sessoes": 2,
+  "turnos": 25,
+  "tokens": {
+    "input_tokens": 50,
+    "cache_read_input_tokens": 833843,
+    "cache_creation_input_tokens": 246478,
+    "output_tokens": 15053,
+    "total": 1095424
+  },
+  "contexto_medio_por_turno": 43817,
+  "ferramentas": {
+    "Read": 12,
+    "<texto>": 4,
+    "Bash": 3,
+    "Write": 2
+  },
+  "gates": {
+    "avaliacoes": 3,
+    "reprovadas": 0,
+    "por_fase": {
+      "red": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      },
+      "green": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      },
+      "verify": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      }
+    }
+  },
+  "qualidade": {
+    "disponivel": false
+  },
+  "por_sessao": [
+    {
+      "arquivo": "a9d16cb5-2d97-4338-ab42-ed4e4d5c96d0.jsonl",
+      "turnos": 13,
+      "cota": 105941,
+      "tokens": {
+        "input_tokens": 26,
+        "cache_read_input_tokens": 467461,
+        "cache_creation_input_tokens": 102277,
+        "output_tokens": 3638,
+        "total": 573402
+      },
+      "contexto": {
+        "primeiro": 41168,
+        "ultimo": 46987,
+        "maximo": 46987,
+        "medio": 43828
+      },
+      "ferramentas": {
+        "Read": 5,
+        "<texto>": 3,
+        "Bash": 2,
+        "Write": 1
+      },
+      "inicio": "2026-09-11T01:16:49.489Z",
+      "fim": "2026-09-11T01:17:21.242Z"
+    },
+    {
+      "arquivo": "e4b96bc7-459e-47f6-a880-0bc0d4441311.jsonl",
+      "turnos": 12,
+      "cota": 155640,
+      "tokens": {
+        "input_tokens": 24,
+        "cache_read_input_tokens": 366382,
+        "cache_creation_input_tokens": 144201,
+        "output_tokens": 11415,
+        "total": 522022
+      },
+      "contexto": {
+        "primeiro": 40217,
+        "ultimo": 48831,
+        "maximo": 48831,
+        "medio": 42551
+      },
+      "ferramentas": {
+        "Read": 7,
+        "Write": 1,
+        "Bash": 1,
+        "<texto>": 1
+      },
+      "inicio": "2026-09-11T01:17:38.302Z",
+      "fim": "2026-09-11T01:18:23.235Z"
+    }
+  ]
+}

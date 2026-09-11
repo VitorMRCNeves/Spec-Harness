@@ -132,27 +132,56 @@ def gates(home: str, desde: float, ate: float) -> dict:
 
 
 def qualidade(repo: str) -> dict:
-    """Nota de qualidade do gate de CRAP, da evidência da fase VERIFY.
+    """Nota de qualidade da fase VERIFY, lida da evidência do packet.
 
     Sem isto o bench mediria só custo, e ficaria fácil 'melhorar' o harness entregando código
-    pior em menos turnos.
+    pior em menos turnos. Os nomes dos campos seguem o que o harness GRAVA: o resumo na
+    evidência traz `violations` / `high_risk` / `average_crap`, e o detalhe por função vive no
+    relatório apontado por `crap.report`. Ler chave que o motor não produz é pior que não medir,
+    porque devolve None e parece reprovação.
     """
     ev = sorted(glob.glob(os.path.join(repo, ".specs", "*", "packets", ".expanded", "*-verify.evidence.json")))
     if not ev:
-        return {"disponivel": False}
+        return {"disponivel": False, "motivo": "nenhuma evidência de fase VERIFY encontrada"}
     d = json.loads(pathlib.Path(ev[-1]).read_text(encoding="utf-8"))
     crap = d.get("crap") or {}
-    funcoes = crap.get("functions") or crap.get("funcoes") or []
-    piores = sorted(
-        ({"file": f.get("file"), "name": f.get("name"), "crap": f.get("crap"),
-          "comp": f.get("comp"), "cov": f.get("cov")} for f in funcoes),
-        key=lambda f: (f.get("crap") or 0), reverse=True,
-    )[:5]
+
+    # O veredito do gate é a ausência de violação E de erro de medição — o gate é fail-closed,
+    # então medição inválida conta como reprovação, não como silêncio.
+    if crap:
+        violacoes = crap.get("violations") or []
+        erros_crap = crap.get("errors") or []
+        crap_ok = not violacoes and not erros_crap
+    else:
+        violacoes, erros_crap, crap_ok = [], [], None
+
+    # Detalhe por função: só o relatório tem, e ele é o que permite ver se o pior caso piorou.
+    piores = []
+    rel = crap.get("report")
+    if rel:
+        caminho = pathlib.Path(rel if os.path.isabs(rel) else os.path.join(repo, rel))
+        if caminho.exists():
+            try:
+                r = json.loads(caminho.read_text(encoding="utf-8"))
+                piores = sorted(
+                    ({"file": f.get("file"), "name": f.get("name"), "crap": f.get("crap"),
+                      "comp": f.get("comp"), "cov": f.get("cov"), "branch_cov": f.get("branch_cov"),
+                      "new": f.get("new")} for f in (r.get("functions") or [])),
+                    key=lambda f: (f.get("crap") or 0), reverse=True,
+                )[:5]
+            except json.JSONDecodeError:
+                piores = []
+
     return {
         "disponivel": True,
         "status": d.get("status"),
-        "crap_ok": crap.get("ok"),
+        "erros_da_fase": d.get("errors") or [],
+        "crap_ok": crap_ok,
+        "crap_violacoes": len(violacoes),
+        "crap_erros_medicao": len(erros_crap),
+        "crap_medio": crap.get("average_crap"),
         "crap_pior": piores[0]["crap"] if piores else None,
+        "crap_funcoes": crap.get("total_functions"),
         "crap_top": piores,
         "validacoes": [
             {"id": v.get("id"), "returncode": v.get("returncode")}
@@ -214,7 +243,11 @@ def resumo(r: dict) -> None:
     print(f"  gates ................ {g['avaliacoes']} avaliações, {g['reprovadas']} reprovadas")
     q = r["qualidade"]
     if q.get("disponivel"):
-        print(f"  qualidade ............ status={q.get('status')} crap_ok={q.get('crap_ok')} pior_crap={q.get('crap_pior')}")
+        print(f"  qualidade ............ status={q.get('status')}  crap_ok={q.get('crap_ok')}  "
+              f"violações={q.get('crap_violacoes')}  pior_crap={q.get('crap_pior')}  "
+              f"médio={q.get('crap_medio')}  funções={q.get('crap_funcoes')}")
+    else:
+        print(f"  qualidade ............ INDISPONÍVEL ({q.get('motivo', 'sem motivo registrado')})")
     print(f"  ferramentas .......... {r['ferramentas']}")
 
 
@@ -247,11 +280,31 @@ def cmd_comparar(a: argparse.Namespace) -> None:
 
     qb, qn = b["qualidade"], n["qualidade"]
     print("\nqualidade (não pode piorar para a economia valer):")
-    print(f"  crap_ok    base={qb.get('crap_ok')}   novo={qn.get('crap_ok')}")
-    print(f"  pior CRAP  base={qb.get('crap_pior')}   novo={qn.get('crap_pior')}")
-    print(f"  status     base={qb.get('status')}   novo={qn.get('status')}")
-    if qn.get("crap_ok") is False or qn.get("status") != "ready_for_review":
-        print("\n  ATENÇÃO: a execução nova não passou nos gates — a economia não é comparável.")
+    # Dado ausente não é reprovação, e tratar um como o outro já produziu alarme falso numa
+    # execução em que os dois lados passaram 3/3. Os três estados são distintos: passou,
+    # reprovou e não foi medido — e "não foi medido" invalida a comparação sem acusar o código.
+    if not (qb.get("disponivel") and qn.get("disponivel")):
+        faltando = [r for r, q in (("base", qb), ("novo", qn)) if not q.get("disponivel")]
+        print(f"  INCONCLUSIVO: sem evidência da fase VERIFY em {', '.join(faltando)}.")
+        print("  A economia não é comparável — não é sinal de que o código piorou.")
+    else:
+        print(f"  status      base={qb.get('status')}   novo={qn.get('status')}")
+        print(f"  crap_ok     base={qb.get('crap_ok')}   novo={qn.get('crap_ok')}")
+        print(f"  violações   base={qb.get('crap_violacoes')}   novo={qn.get('crap_violacoes')}")
+        print(f"  pior CRAP   base={qb.get('crap_pior')}   novo={qn.get('crap_pior')}")
+        print(f"  CRAP médio  base={qb.get('crap_medio')}   novo={qn.get('crap_medio')}")
+        if qn.get("status") != "ready_for_review":
+            print("\n  ATENÇÃO: a execução nova não chegou a ready_for_review — a economia não é comparável.")
+        elif qn.get("crap_ok") is False:
+            print(f"\n  ATENÇÃO: o gate de CRAP reprovou a execução nova "
+                  f"({qn.get('crap_violacoes')} violação(ões), {qn.get('crap_erros_medicao')} erro(s) de medição).")
+        elif (qn.get("crap_pior") or 0) > (qb.get("crap_pior") or 0):
+            print(f"\n  ATENÇÃO: o pior CRAP piorou ({qb.get('crap_pior')} -> {qn.get('crap_pior')}) — "
+                  f"passou no gate, mas a economia veio com código mais arriscado.")
+
+    gb, gn = b["gates"], n["gates"]
+    if gn["reprovadas"] > gb["reprovadas"]:
+        print(f"\n  ATENÇÃO: gates reprovados subiram ({gb['reprovadas']} -> {gn['reprovadas']}).")
 
 
 def main() -> int:

@@ -1,0 +1,107 @@
+{
+  "rotulo": "retomada2",
+  "cota": 91626,
+  "config": {
+    "docs": "lazy",
+    "allowlist": "on",
+    "sessao": "retomada",
+    "autorun_exit": "0"
+  },
+  "segundos": 156.0,
+  "sessoes": 1,
+  "turnos": 25,
+  "tokens": {
+    "input_tokens": 50,
+    "cache_read_input_tokens": 851965,
+    "cache_creation_input_tokens": 70976,
+    "output_tokens": 20600,
+    "total": 943591
+  },
+  "contexto_medio_por_turno": 37744,
+  "ferramentas": {
+    "Read": 7,
+    "<texto>": 5,
+    "Bash": 4,
+    "Glob": 3,
+    "Write": 2
+  },
+  "gates": {
+    "avaliacoes": 3,
+    "reprovadas": 0,
+    "por_fase": {
+      "red": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      },
+      "green": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      },
+      "verify": {
+        "avaliacoes": 1,
+        "reprovadas": 0
+      }
+    }
+  },
+  "qualidade": {
+    "disponivel": true,
+    "status": "ready_for_review",
+    "erros_da_fase": [],
+    "crap_ok": true,
+    "crap_violacoes": 0,
+    "crap_erros_medicao": 0,
+    "crap_medio": 8.013026663952779,
+    "crap_pior": 8.013026663952779,
+    "crap_funcoes": 1,
+    "crap_top": [
+      {
+        "file": "calc/valor.py",
+        "name": "normalizar_valor",
+        "crap": 8.013026663952779,
+        "comp": 8,
+        "cov": 94.11764705882354,
+        "branch_cov": 100.0,
+        "new": true
+      }
+    ],
+    "validacoes": [
+      {
+        "id": "test_verify",
+        "returncode": 0
+      },
+      {
+        "id": "suite_completa",
+        "returncode": 0
+      }
+    ]
+  },
+  "por_sessao": [
+    {
+      "arquivo": "d235ad06-8ce4-4536-b5fa-210d73461747.jsonl",
+      "turnos": 25,
+      "cota": 91626,
+      "tokens": {
+        "input_tokens": 50,
+        "cache_read_input_tokens": 851965,
+        "cache_creation_input_tokens": 70976,
+        "output_tokens": 20600,
+        "total": 943591
+      },
+      "contexto": {
+        "primeiro": 31756,
+        "ultimo": 44106,
+        "maximo": 44106,
+        "medio": 36920
+      },
+      "ferramentas": {
+        "Read": 7,
+        "<texto>": 5,
+        "Bash": 4,
+        "Glob": 3,
+        "Write": 2
+      },
+      "inicio": "2026-09-11T01:23:23.150Z",
+      "fim": "2026-09-11T01:25:30.349Z"
+    }
+  ]
+}

@@ -15,8 +15,7 @@ primeiro. E se `.claude/sdd/perfil.md` existir, leia-o — ele descreve as camad
 repositório que os prompts de RED e GREEN vão cobrar.
 
 Ambiente: ative o ambiente do repositório (ver `CLAUDE.md`/`AGENTS.md` dele) antes de qualquer
-teste ou lint — o harness herda o ambiente da sessão que o invoca. Em
-`dados-one-assistant`, isso é `conda activate one-assistant`.
+teste ou lint — o harness herda o ambiente da sessão que o invoca.
 
 ## Instalação num repositório — você faz, não o usuário
 
@@ -71,10 +70,11 @@ node ~/.claude/spec_harness/harness.ts autorun .specs/sdd-<feature>/packets/SDD-
 node ~/.claude/spec_harness/harness.ts merge-spec .specs/sdd-<feature>/packets/SDD-NN.yaml
 ~~~
 
-`autorun` roda **RED → GREEN → VERIFY numa invocação só**. Cada fase é uma sessão headless
-própria (sonnet) dentro do worktree da spec; o handoff entre elas é o commit da fase anterior na
-branch da spec — determinístico, sem passar por modelo nenhum. Quem orquestra vê uma linha por
-tentativa e o resumo final: não vê o código, nem a saída do pytest, nem os logs das sessões.
+`autorun` roda **RED → GREEN → VERIFY numa invocação só**. RED e GREEN compartilham uma sessão
+headless (sonnet) dentro do worktree da spec, e VERIFY não abre sessão de modelo nenhuma; o
+handoff entre as fases é o commit da fase anterior na branch da spec — determinístico, sem passar
+por modelo. Quem orquestra vê uma linha por tentativa e o resumo final: não vê o código, nem a
+saída do pytest, nem os logs das sessões.
 
 Não leia o diff antes do autorun terminar. O ponto do comando é que as três fases custem uma
 única passagem de contexto no orquestrador; abrir os arquivos no meio desfaz exatamente a
@@ -130,30 +130,6 @@ execução escopada a um arquivo reprova por cobertura mesmo com todos os testes
 o `test_command` gerado sempre traz `--no-cov -p no:cacheprovider`. A cobertura de verdade é da
 suíte completa no CI (`.github/workflows/automated_tests.yaml`), não do gate por spec.
 
-## Uma sessão por spec (cota, não dólar)
-
-O que a assinatura cobra é **contexto novo** — `cache_creation + output`. Reenviar o prefixo a
-cada turno é `cache read`, e isso não entra na conta: medindo a spec 01 de movimentação BTG, os
-30,5M tokens somados eram 911k de cota, 97% do resto era prefixo reenviado. Quem custa, então,
-não é o turno: é **começar de novo**.
-
-Por isso o autorun usa **uma única sessão headless por spec**. O GREEN retoma a do RED e cada
-tentativa retoma a anterior, em vez de abrir sessão fria — o que troca ~38k de piso mais a
-releitura da spec e dos arquivos de orientação por zero. Numa retomada o prompt é
-`implementer.prompts.retomada`, curto de propósito.
-
-**Isso não afrouxa o enforcement.** O hook de path scoping decide pela run **ativa**, que o
-harness troca ao entrar em cada fase; a sessão compartilhada não tem voto nisso. Na prática o
-GREEN continua sem conseguir escrever em arquivo de teste, e a tentativa é registrada em
-`blocked/<run_id>.jsonl` como qualquer outra. Para desligar: `implementer.reuse_session: false`.
-
-`implementer.lean_context` (ligado) corta desperdício do contexto sem remover instrução que o
-modelo use: descarta MCP e os plugins de nível `user`. O ganho principal é um efeito colateral —
-plugin de terminal com `PostToolUse` que falha em sessão headless (não há `/dev/tty`) faz o Claude
-Code gravar stdout e stderr em contexto a **cada** tool call, ~24k de cota por spec. O hook do
-spec-harness é reinjetado por `--settings`, por caminho absoluto, justamente porque ele viria do
-mesmo nível descartado.
-
 ## Quando o autorun para
 
 A saída diz onde: a fase, a evidência, os logs das sessões e o worktree. Leia **a evidência**
@@ -170,16 +146,12 @@ exato. Os caminhos possíveis:
 
 ## Gate composto de CRAP pós-VERIFY (determinístico, sem modelo)
 
-Antes da revisão automática, o harness roda a suíte do escopo com cobertura de linhas e branches
-e pontua CRAP (`complexidade² × (1-cobertura)³ + complexidade`) **só nas funções de produção cujas
-linhas aparecem no diff da spec**. O gate padrão é `block` e combina CRAP por função, teto independente de
-complexidade, limite mais estrito para função nova, branch coverage e delta normalizado contra o
-baseline. Os hashes gravados no RED provam que os testes usados no VERIFY não mudaram.
+Depois do commit do VERIFY, o harness mede risco nas funções de produção que a spec alterou e
+**bloqueia** por padrão — medição inconclusiva também reprova. A evidência traz `required_action`,
+que diz para onde voltar: `green` (complexidade), `red` (cobertura) ou `infrastructure` (medição
+inválida). Nenhum agente recebe "baixe o CRAP" como tarefa.
 
-Relatório ausente/desatualizado, suíte com erro, arquivo pulado ou cobertura sem resumo exato por
-função são inconclusivos e bloqueiam. A evidência indica `required_action`: `green` para reduzir
-complexidade, `red` para cobertura insuficiente e `infrastructure` para medição inválida. Nenhum
-agente recebe "baixe o CRAP" como tarefa. Detalhes em `references/verify.md`.
+Limiares, fórmula e casos de reprovação: `references/verify.md`.
 
 ## Revisão automática pós-VERIFY
 

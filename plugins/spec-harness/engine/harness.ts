@@ -162,6 +162,11 @@ interface RunState {
   capabilities?: RunCapabilities;
   enforcement?: string;
   baseline?: Record<string, string>;
+  // Sessão headless reaproveitada entre as fases e entre as tentativas desta spec. Sobrevive a
+  // `cmdOpenPacket` porque ele copia o run existente ao trocar de fase, e sobrevive ao processo
+  // porque o run é gravado em disco — um `autorun` retomado no dia seguinte continua a mesma
+  // sessão. Ver `runImplementer`.
+  session_id?: string;
 }
 
 interface ValidationResult {
@@ -2350,6 +2355,9 @@ interface ImplementerConfig {
   allowed_tools?: string;
   max_attempts?: number;
   prompts?: Record<string, string>;
+  lean_context?: boolean;
+  reuse_session?: boolean;
+  system_prompt?: string;
 }
 
 function implementerConfig(): ImplementerConfig {
@@ -2409,6 +2417,24 @@ function blocoDeArquivosDeReferencia(packet: Packet): string {
   );
 }
 
+// Settings mínimo passado com `--settings` quando o contexto enxuto está ligado.
+//
+// `--setting-sources project,local` descarta os settings de nível `user`, e com eles os plugins
+// instalados na máquina. Isso é o objetivo — o plugin do terminal (claude-code-warp) tem um
+// PostToolUse que escreve uma sequência de escape em /dev/tty, que não existe numa sessão
+// headless: ele falha, e o Claude Code grava stdout + stderr em contexto a CADA tool call
+// (~772 chars, ~24k tokens de cota por spec). Mas o hook de path scoping do spec-harness também
+// vem do plugin, e perdê-lo desligaria o enforcement: o GREEN passaria a poder reescrever o
+// teste do RED. Por isso ele é reinjetado aqui, por caminho absoluto e sem depender de
+// ${CLAUDE_PLUGIN_ROOT}.
+function leanSettingsJson(): string {
+  return JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: HOOK_GUARD, timeout: 15 }] }],
+    },
+  });
+}
+
 function runImplementer(
   phase: Phase,
   packet: Packet,
@@ -2417,10 +2443,19 @@ function runImplementer(
   logPath: string
 ): Promise<number> {
   const cfg = implementerConfig();
-  const template = cfg.prompts?.[phase];
-  if (!template) die(`implementer.prompts.${phase} ausente em ${path.relative(REPO_ROOT, CONFIG_PATH)}`);
+  const reuse = cfg.reuse_session !== false;
 
-  const prompt = interpolate(template, {
+  // Retomar troca o prompt: a sessão já leu a spec, já sabe onde as coisas ficam e já tem o
+  // teste do RED no contexto — tudo isso a preço de cache read, que a assinatura não cobra.
+  // Repetir o prompt frio aqui desperdiçaria a única coisa que a retomada compra.
+  const retomando = reuse && Boolean(run.session_id);
+  const chave = retomando ? "retomada" : phase;
+  const template = cfg.prompts?.[chave];
+  if (!template) {
+    die(`implementer.prompts.${chave} ausente em ${path.relative(REPO_ROOT, CONFIG_PATH)}`);
+  }
+
+  const vars = {
     spec: packet.source_spec ?? "",
     phase,
     app: packet.app ?? "",
@@ -2429,8 +2464,17 @@ function runImplementer(
     write_paths: (packet.capabilities?.write?.paths ?? []).join("\n  - "),
     read_paths: (packet.capabilities?.read?.paths ?? []).join("\n  - "),
     test_command: (packet.validation?.commands ?? [])[0]?.run ?? "",
-    feedback: feedback || "(primeira tentativa — nenhum gate reprovado ainda)",
-  }) + blocoDeArquivosDeReferencia(packet) + blocoDeDocsDaFase(phase) + BLOCO_FALHA_DE_AMBIENTE;
+    feedback: feedback || "(primeira vez nesta fase — nenhum gate reprovado ainda)",
+  };
+
+  // Numa retomada o modelo já recebeu estes blocos na primeira invocação da sessão; reenviá-los
+  // só acrescentaria contexto novo, que é exatamente o que custa cota.
+  const prompt = retomando
+    ? interpolate(template, vars)
+    : interpolate(template, vars) +
+      blocoDeArquivosDeReferencia(packet) +
+      blocoDeDocsDaFase(phase) +
+      BLOCO_FALHA_DE_AMBIENTE;
 
   const args = [
     "-p",
@@ -2444,6 +2488,23 @@ function runImplementer(
     "--allowedTools",
     cfg.allowed_tools ?? "Read Grep Glob Bash Write Edit",
   ];
+
+  if (reuse) {
+    if (!run.session_id) {
+      run.session_id = crypto.randomUUID();
+      saveRun(run);
+    }
+    args.push(retomando ? "--resume" : "--session-id", run.session_id);
+  }
+
+  // Corte de desperdício puro: nada aqui remove instrução que o modelo use. Medido no apps-dados,
+  // o piso do 1o turno cai de 38.115 para 32.365 tokens — e some o ruído do hook do terminal.
+  // `implementer.system_prompt` derruba para ~23.640, mas substitui as diretrizes de ferramenta
+  // do Claude Code: é troca de qualidade por token, então fica desligado por padrão.
+  if (cfg.lean_context !== false) {
+    args.push("--strict-mcp-config", "--setting-sources", "project,local", "--settings", leanSettingsJson());
+    if (cfg.system_prompt) args.push("--system-prompt", cfg.system_prompt);
+  }
 
   return new Promise((resolve) => {
     const child = spawn("claude", args, {
@@ -2517,8 +2578,16 @@ async function cmdAutorun(args: string[]): Promise<void> {
       attempt += 1;
       const logPath = path.join(logDir, `${phase}-${attempt}.log`);
       const t0 = Date.now();
+      const retomou = usaImplementador && Boolean(run.session_id);
       const code = usaImplementador ? await runImplementer(phase, packet, run, feedback, logPath) : 0;
       const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
+      if (usaImplementador) {
+        console.log(
+          retomou
+            ? `[${phase}] sessão retomada (${run.session_id}) — spec e orientação já no contexto`
+            : `[${phase}] sessão nova (${run.session_id})`
+        );
+      }
       const outcome = await verifyPacket(packetPath, true);
       ok = outcome.ok;
       changed = outcome.changed_files.length;

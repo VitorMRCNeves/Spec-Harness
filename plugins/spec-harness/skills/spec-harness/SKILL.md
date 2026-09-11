@@ -130,6 +130,30 @@ execução escopada a um arquivo reprova por cobertura mesmo com todos os testes
 o `test_command` gerado sempre traz `--no-cov -p no:cacheprovider`. A cobertura de verdade é da
 suíte completa no CI (`.github/workflows/automated_tests.yaml`), não do gate por spec.
 
+## Uma sessão por spec (cota, não dólar)
+
+O que a assinatura cobra é **contexto novo** — `cache_creation + output`. Reenviar o prefixo a
+cada turno é `cache read`, e isso não entra na conta: medindo a spec 01 de movimentação BTG, os
+30,5M tokens somados eram 911k de cota, 97% do resto era prefixo reenviado. Quem custa, então,
+não é o turno: é **começar de novo**.
+
+Por isso o autorun usa **uma única sessão headless por spec**. O GREEN retoma a do RED e cada
+tentativa retoma a anterior, em vez de abrir sessão fria — o que troca ~38k de piso mais a
+releitura da spec e dos arquivos de orientação por zero. Numa retomada o prompt é
+`implementer.prompts.retomada`, curto de propósito.
+
+**Isso não afrouxa o enforcement.** O hook de path scoping decide pela run **ativa**, que o
+harness troca ao entrar em cada fase; a sessão compartilhada não tem voto nisso. Na prática o
+GREEN continua sem conseguir escrever em arquivo de teste, e a tentativa é registrada em
+`blocked/<run_id>.jsonl` como qualquer outra. Para desligar: `implementer.reuse_session: false`.
+
+`implementer.lean_context` (ligado) corta desperdício do contexto sem remover instrução que o
+modelo use: descarta MCP e os plugins de nível `user`. O ganho principal é um efeito colateral —
+plugin de terminal com `PostToolUse` que falha em sessão headless (não há `/dev/tty`) faz o Claude
+Code gravar stdout e stderr em contexto a **cada** tool call, ~24k de cota por spec. O hook do
+spec-harness é reinjetado por `--settings`, por caminho absoluto, justamente porque ele viria do
+mesmo nível descartado.
+
 ## Quando o autorun para
 
 A saída diz onde: a fase, a evidência, os logs das sessões e o worktree. Leia **a evidência**

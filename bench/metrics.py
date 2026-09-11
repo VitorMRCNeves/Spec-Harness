@@ -86,9 +86,12 @@ def mede_sessao(caminho: pathlib.Path) -> dict:
                         ferramentas["<texto>"] += 1
 
     total = sum(uso.values())
+    # Cota = o que a assinatura debita. cache_read fica de fora de propósito.
+    cota = (uso["input_tokens"] + uso["cache_creation_input_tokens"] + uso["output_tokens"])
     return {
         "arquivo": caminho.name,
         "turnos": turnos,
+        "cota": cota,
         "tokens": {**uso, "total": total},
         "contexto": {
             "primeiro": contextos[0] if contextos else 0,
@@ -173,8 +176,10 @@ def cmd_coletar(a: argparse.Namespace) -> None:
         ferramentas.update(m["ferramentas"])
     ctx_medio = round(somas["total"] / turnos) if turnos else 0
 
+    cota = somas["input_tokens"] + somas["cache_creation_input_tokens"] + somas["output_tokens"]
     registro = {
         "rotulo": a.rotulo,
+        "cota": cota,
         "config": dict(kv.split("=", 1) for kv in (a.extra or [])),
         "segundos": round(a.ate - a.desde, 1),
         "sessoes": len(medidas),
@@ -198,10 +203,12 @@ def resumo(r: dict) -> None:
     print(f"\n  rótulo ............... {r['rotulo']}  {r['config'] or ''}")
     print(f"  tempo de parede ...... {r['segundos']}s")
     print(f"  sessões / turnos ..... {r['sessoes']} / {r['turnos']}")
-    print(f"  tokens (total) ....... {t.get('total', 0):,}")
-    print(f"    cache_read ......... {t.get('cache_read_input_tokens', 0):,}")
+    print(f"  COTA (o que conta) ... {r.get('cota', 0):,}   = cache_write + output + input")
     print(f"    cache_write ........ {t.get('cache_creation_input_tokens', 0):,}")
     print(f"    output ............. {t.get('output_tokens', 0):,}")
+    print(f"    input fresco ....... {t.get('input_tokens', 0):,}")
+    print(f"  contexto reenviado ... {t.get('cache_read_input_tokens', 0):,}   (cache_read: NÃO conta na cota)")
+    print(f"  tokens somados ....... {t.get('total', 0):,}   (número enganoso — não otimize por ele)")
     print(f"  contexto médio/turno . {r['contexto_medio_por_turno']:,}")
     g = r["gates"]
     print(f"  gates ................ {g['avaliacoes']} avaliações, {g['reprovadas']} reprovadas")
@@ -224,11 +231,13 @@ def cmd_comparar(a: argparse.Namespace) -> None:
     print(f"\nbase: {b['rotulo']} {b['config'] or ''}")
     print(f"novo: {n['rotulo']} {n['config'] or ''}\n")
     linhas = [
+        ("COTA", b.get("cota", 0), n.get("cota", 0)),
+        ("  cache_write", b["tokens"].get("cache_creation_input_tokens", 0), n["tokens"].get("cache_creation_input_tokens", 0)),
+        ("  output", b["tokens"].get("output_tokens", 0), n["tokens"].get("output_tokens", 0)),
+        ("sessões (frias)", b["sessoes"], n["sessoes"]),
         ("tempo (s)", b["segundos"], n["segundos"]),
         ("turnos", b["turnos"], n["turnos"]),
-        ("tokens total", b["tokens"].get("total", 0), n["tokens"].get("total", 0)),
-        ("cache_read", b["tokens"].get("cache_read_input_tokens", 0), n["tokens"].get("cache_read_input_tokens", 0)),
-        ("output", b["tokens"].get("output_tokens", 0), n["tokens"].get("output_tokens", 0)),
+        ("contexto reenviado", b["tokens"].get("cache_read_input_tokens", 0), n["tokens"].get("cache_read_input_tokens", 0)),
         ("contexto médio/turno", b["contexto_medio_por_turno"], n["contexto_medio_por_turno"]),
         ("gates reprovados", b["gates"]["reprovadas"], n["gates"]["reprovadas"]),
     ]

@@ -32,6 +32,19 @@ node ~/.claude/spec_harness/harness.ts verify-packet .specs/sdd-<feature>/packet
   significa exit 1 com `failed` na saída, nunca o exit 2 de erro de coleta (ver
   `task-packets.md#módulo-que-ainda-não-existe`).
 
+### Enforcement com sessão compartilhada
+
+O `autorun` usa uma sessão headless por spec: o GREEN retoma a do RED. Isso **não** abre brecha
+no path scoping, porque quem decide é a run **ativa**, e o harness a troca ao entrar na fase —
+`cmdOpenPacket` regrava `capabilities.write` com o escopo da fase nova, e o hook `PreToolUse`
+resolve a run pelo `cwd`, não pela sessão. Consequência prática: o GREEN não consegue editar o
+teste do RED nem estando na mesma sessão que o escreveu, e a tentativa aparece em
+`blocked/<run_id>.jsonl` como qualquer outra.
+
+Verificado num worktree sintético: com `write` trocado de `calc/tests/**` para `calc/a.py` e a
+sessão retomada, o `Edit` no arquivo de teste sai com exit 2 e `path fora de
+capabilities.write.paths`, e o arquivo fica byte-idêntico.
+
 Cada execução também acrescenta uma linha JSON em
 `${SPEC_HARNESS_METRICS_FILE}` ou `/tmp/spec_harness/metrics.jsonl` com
 arquivos alterados, chamadas bloqueadas e totais de validação.

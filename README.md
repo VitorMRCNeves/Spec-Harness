@@ -111,9 +111,18 @@ node ~/.claude/spec_harness/harness.ts autorun     .specs/sdd-<feature>/packets/
 node ~/.claude/spec_harness/harness.ts merge-spec  .specs/sdd-<feature>/packets/SDD-NN.yaml
 ```
 
-O `autorun` encadeia as três fases numa invocação. Cada fase é uma sessão headless dentro do
-worktree; o handoff entre elas é o **commit da fase anterior**, não um resumo gerado por modelo.
-Quem orquestra vê uma linha por tentativa.
+O `autorun` encadeia as três fases numa invocação. O handoff entre elas é o **commit da fase
+anterior**, não um resumo gerado por modelo. Quem orquestra vê uma linha por tentativa.
+
+As fases compartilham **uma sessão headless por spec**: o GREEN retoma a do RED e cada tentativa
+retoma a anterior. O motivo é a unidade de cobrança de uma assinatura, que é **contexto novo**
+(`cache_creation + output`) e não o total de tokens — reenviar o prefixo é `cache read` e não
+entra na conta. Medindo uma spec real, os 30,5M tokens somados eram 911k de cota. Retomar troca
+~38k de piso por sessão, mais a releitura da spec e da orientação, por zero.
+
+O enforcement não muda por isso: o hook decide pela run **ativa**, que o harness troca a cada
+fase, então o GREEN não consegue escrever em arquivo de teste nem compartilhando a sessão com o
+RED (`implementer.reuse_session: false` desliga).
 
 ### Comandos
 
@@ -222,11 +231,16 @@ aberta, e o `verify-packet` recusa qualquer arquivo alterado fora do escopo. Mas
 Claude Code chamar o hook: um processo que você dispare por fora (um script, um editor) não é
 interceptado. O gate de diff no VERIFY é a rede de baixo.
 
-**3. As fases custam tokens de verdade.**
-RED e GREEN são sessões headless (padrão: sonnet), com até 2 tentativas cada, e a revisão
-pós-VERIFY são mais duas sessões. Uma spec = até 6 sessões. Uma sessão que termina com **zero
-arquivo alterado** quase nunca é problema de spec: costuma ser limite de gasto da conta, spawn
-falhando ou path bloqueado pelo hook — o `autorun` imprime a cauda do log nesse caso.
+**3. As fases custam cota de verdade.**
+RED e GREEN compartilham uma sessão headless (padrão: sonnet), com até 2 tentativas cada, e a
+revisão pós-VERIFY são mais duas sessões — frias, e por isso as mais caras por unidade de
+trabalho. Uma sessão que termina com **zero arquivo alterado** quase nunca é problema de spec:
+costuma ser limite de gasto da conta, spawn falhando ou path bloqueado pelo hook — o `autorun`
+imprime a cauda do log nesse caso.
+
+O que dói na cota é **começar de novo**, não o turno: um turno extra custa ~3,6k, uma sessão
+fria custa ~32k só para existir. Daí a ordem das otimizações aqui ser retomar sessão, cortar
+desperdício de contexto e reduzir o número de sessões — nunca limitar turnos.
 
 **4. `.specs/` costuma estar no `.gitignore`.**
 Se estiver, o worktree da spec nasce **sem** a spec Markdown. O motor copia os artefatos

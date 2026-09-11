@@ -2443,7 +2443,17 @@ function runImplementer(
   logPath: string
 ): Promise<number> {
   const cfg = implementerConfig();
-  const reuse = cfg.reuse_session !== false;
+  // Config anterior a este recurso não tem `prompts.retomada`, e retomar sem ele deixaria a
+  // sessão sem instrução de fase — inclusive sem a fronteira de escrita nova. Nesse caso o
+  // reaproveitamento se desliga sozinho e o comportamento volta ao de antes: um upgrade do motor
+  // não pode quebrar um repositório já configurado, nem afrouxar o enforcement em silêncio.
+  const reuse = cfg.reuse_session !== false && Boolean(cfg.prompts?.retomada);
+  if (cfg.reuse_session !== false && !cfg.prompts?.retomada) {
+    console.log(
+      `  AVISO: implementer.prompts.retomada ausente em ${path.relative(REPO_ROOT, CONFIG_PATH)} — ` +
+        `cada fase abrirá sessão fria. Copie o prompt do template para reaproveitar a sessão.`
+    );
+  }
 
   // Retomar troca o prompt: a sessão já leu a spec, já sabe onde as coisas ficam e já tem o
   // teste do RED no contexto — tudo isso a preço de cache read, que a assinatura não cobra.
@@ -3232,9 +3242,19 @@ function diagnostico(): Problema[] {
     }
   }
 
-  const impl = (cfg as { implementer?: { prompts?: Record<string, string> } }).implementer;
+  const impl = (cfg as {
+    implementer?: { prompts?: Record<string, string>; reuse_session?: boolean };
+  }).implementer;
   for (const fase of ["red", "green"]) {
     if (!impl?.prompts?.[fase]) add("ERRO", `implementer.prompts.${fase}`, "ausente — o autorun não teria o que mandar para a sessão da fase.");
+  }
+  if (impl?.reuse_session !== false && !impl?.prompts?.retomada) {
+    add(
+      "AVISO",
+      "implementer.prompts.retomada",
+      "ausente — cada fase abrirá sessão fria, pagando o piso de contexto de novo. " +
+        "Copie o prompt do templates/harness.config.template.json."
+    );
   }
 
   return problemas;

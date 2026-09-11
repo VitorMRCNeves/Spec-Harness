@@ -12,13 +12,14 @@
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROTULO=""; DOCS="lazy"; ALLOWLIST="on"; MANTER=0; DRY=0
+ROTULO=""; DOCS="lazy"; ALLOWLIST="on"; MANTER=0; DRY=0; SESSAO="retomada"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rotulo)    ROTULO="$2"; shift 2 ;;
     --docs)      DOCS="$2"; shift 2 ;;       # eager | lazy
     --allowlist) ALLOWLIST="$2"; shift 2 ;;  # on | off
+    --sessao)    SESSAO="$2"; shift 2 ;;     # retomada | fria
     --manter)    MANTER=1; shift ;;          # não apaga o sandbox no fim
     --dry)       DRY=1; shift ;;             # valida a canalização sem gastar sessão de modelo
     -h|--help)   sed -n '2,12p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -28,6 +29,7 @@ done
 [[ -n "$ROTULO" ]] || { echo "uso: run-bench.sh --rotulo NOME [--docs eager|lazy] [--allowlist on|off]" >&2; exit 2; }
 [[ "$DOCS" == "eager" || "$DOCS" == "lazy" ]] || { echo "--docs: eager|lazy" >&2; exit 2; }
 [[ "$ALLOWLIST" == "on" || "$ALLOWLIST" == "off" ]] || { echo "--allowlist: on|off" >&2; exit 2; }
+[[ "$SESSAO" == "retomada" || "$SESSAO" == "fria" ]] || { echo "--sessao: retomada|fria" >&2; exit 2; }
 
 HARNESS="${SPEC_HARNESS_TS:-$HOME/.claude/spec_harness/harness.ts}"
 [[ -f "$HARNESS" ]] || { echo "motor não encontrado: $HARNESS (defina SPEC_HARNESS_TS)" >&2; exit 1; }
@@ -54,6 +56,19 @@ d = json.load(open(p))
 d.pop("docs", None)   # sem a chave o motor não injeta bloco nenhum — é o comportamento antigo
 json.dump(d, open(p, "w"), indent=2, ensure_ascii=False)
 PY
+fi
+
+# `fria` reproduz o comportamento anterior: uma sessão headless por FASE, cada uma pagando o piso
+# de contexto de novo. É a base contra a qual a retomada é medida.
+if [[ "$SESSAO" == "fria" ]]; then
+  python3 - "$REPO/.claude/spec_harness/harness.config.json" <<'PY2'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["implementer"]["reuse_session"] = False
+d["implementer"]["lean_context"] = False
+json.dump(d, open(p, "w"), indent=2, ensure_ascii=False)
+PY2
 fi
 
 # O worktree da spec nasce da BRANCH: tudo que a fase precisa tem de estar commitado, inclusive o

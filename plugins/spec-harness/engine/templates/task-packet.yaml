@@ -7,8 +7,8 @@ schema_version: 2
 unified: true
 feature: <feature-slug>            # mesmo slug da pasta .specs/sdd-<feature-slug>/
 spec_number: 1                     # NN da spec, sem zero-padding
-app: ata_agente                    # escopo único: assistente | batimentos | ata_agente |
-                                   # faq_backoffice | shared (ver harness.config.json)
+app: <escopo>                      # escopo único da spec — um dos nomes declarados em
+                                   # `scopes` do harness.config.json deste repositório
 source_spec: .specs/sdd-<feature-slug>/specs/01-<nome-spec>.md
 
 required_reads:
@@ -20,15 +20,17 @@ context_paths: []
 
 # O que a fase RED pode escrever:
 test_paths:
-  - app/plataformas/ata_agente/tests/unit/test_<modulo>.py
+  - <prefixo-de-teste-do-escopo>/test_<modulo>.py
 
 # O que a fase GREEN pode escrever (a fase VERIFY não escreve nada):
 impl_paths:
-  - app/plataformas/ata_agente/<modulo>.py
+  - <prefixo-de-producao-do-escopo>/<modulo>.py
 
-# --no-cov é obrigatório: o addopts do pytest.ini exige 80% de cobertura do projeto inteiro e
-# reprovaria qualquer execução escopada a um arquivo.
-test_command: pytest -q --no-cov -p no:cacheprovider app/plataformas/ata_agente/tests/unit/test_<modulo>.py -m "not llm_integration"
+# Vem de `scaffold.test_command_template` do harness.config.json. Precisa falhar com código != 0
+# quando o teste da fase RED falha, e não abortar na coleta. Se o runner do repositório já força
+# cobertura mínima via addopts, desligue-a aqui (em pytest, --no-cov): uma execução escopada a um
+# arquivo reprovaria por cobertura mesmo com todos os testes verdes.
+test_command: <comando de teste do repositório> <prefixo-de-teste-do-escopo>/test_<modulo>.py
 
 # behavior_change (padrão, spec altera código existente) | new_module (+ missing_module)
 red_expects: behavior_change
@@ -41,7 +43,7 @@ phases:
   green: {}
     # requirements: [RF-01]        # recorte de IDs desta fase (vazio = todos)
     # artifacts:                   # contratos estruturais, quando o teste não os observa
-    #   - path: app/plataformas/ata_agente/<modulo>.py
+    #   - path: <prefixo-de-producao-do-escopo>/<modulo>.py
     #     requirements: [RF-01]
     #     contains: ["logger."]
     #     min_count: 1

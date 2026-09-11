@@ -18,12 +18,12 @@ node ~/.claude/spec_harness/harness.ts verify-packet .specs/sdd-<feature>/packet
 - spec Markdown existente e sem marcador `⚠️ ABERTO:` pendente;
 - IDs RF/EC/T existentes na spec;
 - diff restrito a `capabilities.write.paths` e ao escopo declarado em `app` — sem cruzar
-  `app/plataformas/<dominio>/` com outro domínio nem com `app/shared/`;
+  prefixos que pertençam exclusivamente a outro escopo de `scopes`;
 - novas alterações em arquivos previamente sujos detectadas por fingerprint;
 - validações referenciadas em `done_when.validation_ids` executadas;
 - contratos estruturais de `validation.artifacts` satisfeitos, quando declarados;
-- validadores globais rodados nos `.py` alterados do escopo — hoje `ruff check`
-  (`format` e `typecheck` estão desligados na config; o porquê está no `SKILL.md`);
+- validadores globais de `validators` rodados nos arquivos alterados do escopo, filtrados por
+  `source_extensions`; os desligados (`null`) não rodam — ver `SKILL.md`;
 - estado runtime e bloqueios registrados quando a execução veio de `open-packet`;
 - runtime do mesmo `open-packet` obrigatório e ligado à evidência por hash;
 - bloqueios preventivos exigem revisão no modo default `review`; no modo
@@ -131,8 +131,8 @@ O verifier ainda deve conferir os campos de `manual_review` da evidência:
 - `contract.must`;
 - `contract.must_not`;
 - `forbidden.behaviors` (ex.: `except Exception` antes das exceções específicas, `print()` em vez
-  de `logger`, acesso a Redis fora do `StateManager`, import cruzando domínios, credencial fora
-  de `get_secret_value()`);
+  do logger, acesso direto a um recurso que deveria passar por abstração, import cruzando
+  domínios, credencial lida do ambiente em vez do resolvedor de segredos do repositório);
 - `review.focus`.
 
 `status: ready_for_review` não significa aprovação final. Significa que os
@@ -160,7 +160,6 @@ semântico, e é seu.
 `autorun --no-merge` existe para essa pausa. Sem a flag, o merge e o apagamento da branch
 acontecem no fim do próprio autorun, sem intervalo para leitura.
 
-Lembre que o PR do repositório ainda tem gates próprios — em `dados-one-assistant`,
-`.github/workflows/automated_tests.yaml` roda a suíte completa com PostgreSQL real e a cobertura
-de 80%, e `gemini-review.yml` faz o review automático do PR. A revisão do harness é a que
+Lembre que o PR do repositório ainda tem gates próprios: tipicamente a suíte completa com os
+serviços de verdade, a cobertura de projeto e um review automático. A revisão do harness é a que
 acontece cedo, não a única.

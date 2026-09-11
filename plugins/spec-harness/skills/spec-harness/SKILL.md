@@ -33,8 +33,8 @@ node ~/.claude/spec_harness/harness.ts doctor        # --json para consumir a li
 
 `init-repo` **detecta** linguagem, extensões, marcadores de teste, comando de teste (lendo
 `pytest.ini`/`package.json`/`go.mod` — inclusive `--no-cov` quando o `addopts` já força cobertura),
-linter, escopos (subdiretórios do contêiner de domínios: `app/plataformas`, `src/modules`,
-`packages`…), `copy_paths` (`.env` que existir) e se a etapa de CRAP tem `radon`/`pytest-cov`
+linter, escopos (subdiretórios do contêiner de domínios: `src/modules`, `src/domains`,
+`packages`, `apps`…), `copy_paths` (`.env` que existir) e se a etapa de CRAP tem `radon`/`pytest-cov`
 disponíveis. O que ele não infere vira `_pendencias` no próprio JSON, e o `doctor` trata cada
 pendência como **ERRO** — ou seja, sai com código 1 enquanto a configuração estiver incompleta.
 
@@ -93,7 +93,7 @@ cada fase é gravada. Não edite os expandidos.
 
 | Campo | O que é |
 |---|---|
-| `app` | escopo único da spec: `assistente`, `batimentos`, `ata_agente`, `faq_backoffice` ou `shared` |
+| `app` | escopo único da spec — um dos nomes declarados em `scopes` do `harness.config.json` |
 | `test_paths` | o que a fase RED pode escrever |
 | `impl_paths` | o que a fase GREEN pode escrever (VERIFY não escreve nada) |
 | `context_paths` | leitura extra além da spec, dos testes e da produção — só o necessário |
@@ -110,9 +110,9 @@ tem `## Arquivos permitidos`, é a spec que está incompleta.
 
 ## RED em Python — a diferença que quebra o gate
 
-Num projeto TypeScript, um teste RED de módulo inexistente falha como teste. Aqui ele quebra na
-**coleta**: `pytest` sai com código 2 e nenhum "failed" na saída — indistinguível de um erro de
-import por typo. Por isso o gate de RED é declarado, não "qualquer retorno não zero":
+Em muitas linguagens, um teste RED que referencia módulo inexistente falha como teste. Em Python
+ele quebra na **coleta**: `pytest` sai com código 2 e nenhum "failed" na saída — indistinguível de
+um erro de import por typo. Por isso o gate de RED é declarado, não "qualquer retorno não zero":
 
 - `red_expects: behavior_change` (o caso comum — a spec muda código existente): exige exit 1 com
   `failed` e **proíbe** `ModuleNotFoundError`/`ImportError`/`SyntaxError` na saída.
@@ -123,12 +123,13 @@ import por typo. Por isso o gate de RED é declarado, não "qualquer retorno nã
 O prompt da fase RED já carrega essa convenção; o campo existe para o gate poder recusar um typo
 travestido de RED.
 
-## `--no-cov` não é opcional
+## Cobertura mínima do runner atrapalha o gate por spec
 
-O `addopts` do `pytest.ini` inclui `--cov-fail-under=80` medindo `app/` inteiro: qualquer
-execução escopada a um arquivo reprova por cobertura mesmo com todos os testes verdes. Por isso
-o `test_command` gerado sempre traz `--no-cov -p no:cacheprovider`. A cobertura de verdade é da
-suíte completa no CI (`.github/workflows/automated_tests.yaml`), não do gate por spec.
+Se o runner do repositório força cobertura mínima na configuração global (em pytest, um
+`--cov-fail-under` no `addopts`), qualquer execução escopada a um arquivo reprova por cobertura
+mesmo com todos os testes verdes. Por isso `scaffold.test_command_template` deve desligar a
+cobertura no comando da spec — em pytest, `--no-cov -p no:cacheprovider`. Cobertura de projeto é
+gate do CI; o gate por spec mede outra coisa.
 
 ## Quando o autorun para
 
@@ -180,15 +181,16 @@ contrário, `--no-merge` + `merge-spec`.
 
 ## Path scoping
 
-Uma spec toca **um escopo**. Uma mudança que atravessa domínios é mais de uma spec — é a regra
-de dependências inviolável do `CLAUDE.md` (`NUNCA: domínio A → domínio B`,
-`NUNCA: shared/ → plataformas/`) aplicada ao packet. O hook `PreToolUse` bloqueia leitura e
-escrita fora dos paths declarados enquanto a sessão da fase roda, e `verify-packet` recusa
-qualquer arquivo alterado fora de `capabilities.write.paths`.
+Uma spec toca **um escopo**. Uma mudança que atravessa domínios é mais de uma spec: é a regra
+de dependências entre camadas do repositório (a que o `CLAUDE.md`/`AGENTS.md` dele declarar)
+aplicada ao packet. O hook `PreToolUse` bloqueia leitura e escrita fora dos paths declarados
+enquanto a sessão da fase roda, e `verify-packet` recusa qualquer arquivo alterado fora de
+`capabilities.write.paths`.
 
 Quando um tipo/DTO serve a mais de um domínio, ele não é redigitado em cada um: vira uma spec
-própria escopada em `app/shared/models/**`, e as specs dependentes declaram `Depende de` no
-cabeçalho e leem a seção `## Contratos` dela — nunca os arquivos de produção uma da outra.
+própria, escopada no prefixo compartilhado que o repositório usar para isso, e as specs
+dependentes declaram `Depende de` no cabeçalho e leem a seção `## Contratos` dela — nunca os
+arquivos de produção uma da outra.
 
 ## Perfil do repositório — `harness.config.json`
 
@@ -201,13 +203,11 @@ Caminhos de ferramenta na config (ex.: `crap.tool: tools/crap_calculator.py`) re
 contra o motor global e só depois contra o repo — assim um repo pode sobrescrever uma ferramenta
 sem alterar o motor. `SPEC_HARNESS_CONFIG` aponta para outra config, útil para smoke tests.
 
-O que segue é o perfil de `dados-one-assistant`, como exemplo de decisão de gate:
-
-**Por que `typecheck: null`:** `mypy` acusa 352 erros pré-existentes em 42 arquivos e leva mais
-de dois minutos — como gate por fase, reprovaria specs por dívida alheia. **Por que
-`format: null`:** `app/shared/` tem 17 de 48 arquivos fora do `ruff format`, e tocar um arquivo
-legado obrigaria a reformatá-lo inteiro, inflando o diff para além dos Arquivos permitidos.
-Ambos viram gate no dia em que a base ficar limpa.
+Desligar um validador (`null`) é decisão de base, não preguiça, e o motivo vai num `_comment`
+ao lado. Dois casos típicos: **typecheck** que acusa centenas de erros pré-existentes reprovaria
+specs por dívida alheia; **formatador** numa base parcialmente formatada obrigaria a reformatar
+o arquivo legado inteiro, inflando o diff para além dos Arquivos permitidos. Ambos viram gate no
+dia em que a base ficar limpa.
 
 A fase VERIFY não tem prompt de implementador de propósito: ela não escreve nada, e seus
 validadores são rodados pelo próprio harness — uma sessão ali só gastaria tokens para observar

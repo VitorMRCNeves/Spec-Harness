@@ -405,7 +405,7 @@ function crapConfig(): CrapConfig {
 
 // Comando de teste que o scaffold escreve no packet. Fica na config porque é a única parte do
 // scaffolder que é de stack: os gates só precisam do resultado, não do runner.
-const DEFAULT_TEST_COMMAND = 'pytest -q --no-cov -p no:cacheprovider {test_paths} -m "not llm_integration"';
+const DEFAULT_TEST_COMMAND = "pytest -q --no-cov -p no:cacheprovider {test_paths}";
 
 function scaffoldTestCommand(testArgs: string): string {
   const tmpl = CFG().scaffold?.test_command_template ?? DEFAULT_TEST_COMMAND;
@@ -717,8 +717,9 @@ function saveActive(key: string, runId: string): void {
 
 // Traz para o worktree novo o estado local não versionado que os testes precisam.
 // `link_paths` são diretórios pesados compartilháveis (num repo Node, node_modules); `copy_paths`
-// são arquivos que cada worktree pode evoluir sozinho (ex.: .env). Neste repositório o ambiente
-// Python é o conda 'one-assistant', global à máquina — não há nada para linkar.
+// são arquivos que cada worktree pode evoluir sozinho (ex.: .env). Ambiente de interpretador
+// global à máquina (um env conda, um pyenv) não precisa de nenhum dos dois: o worktree o herda
+// da sessão que invoca o harness.
 function applyWorktreeExtras(worktree: string): void {
   for (const rel of CFG().worktree?.link_paths ?? []) {
     const src = path.join(REPO_ROOT, rel);
@@ -2212,6 +2213,17 @@ function extractSection(text: string, heading: string): string {
 // bullet de cada bloco valem como path — a prosa do bloco 'Proibido tocar' cita paths de outros
 // escopos, e varrer a seção inteira em busca de crases arrastaria esses paths para dentro do
 // packet.
+// Um token em crase dentro de um bullet é caminho do repositório quando bate com prefixo
+// declarado em `scopes` ou, na falta disso, quando tem a cara de arquivo-fonte deste repo. O
+// critério sai da config, não de uma raiz fixa: exigir `app/` fazia o scaffold encontrar zero
+// arquivo em qualquer repositório com outro layout, e o packet tinha de ser escrito à mão.
+function pareceCaminhoDoRepo(tok: string): boolean {
+  if (!tok.includes("/") || /\s/.test(tok)) return false;
+  const prefixos = [...new Set(scopeNames().flatMap((s) => scopePaths(s)))];
+  if (prefixos.some((p) => tok.startsWith(p))) return true;
+  return sourceExtensions().some((ext) => tok.endsWith(ext));
+}
+
 function blocosRotulados(section: string): Array<{ label: string; paths: string[] }> {
   const blocos: Array<{ label: string; paths: string[] }> = [];
   let atual: { label: string; paths: string[] } | null = null;
@@ -2224,10 +2236,21 @@ function blocosRotulados(section: string): Array<{ label: string; paths: string[
     }
     if (!atual || !/^\s*[-*]\s/.test(line)) continue;
     for (const m of line.matchAll(/`([^`]+)`/g)) {
-      if (m[1].startsWith("app/")) atual.paths.push(m[1]);
+      if (pareceCaminhoDoRepo(m[1])) atual.paths.push(m[1]);
     }
   }
   return blocos.map((b) => ({ label: b.label, paths: [...new Set(b.paths)] }));
+}
+
+// Prefixos declarados por este escopo e por nenhum outro. É o que permite desempatar quando um
+// prefixo compartilhado (um `tests/` comum a vários escopos) faz os paths baterem em mais de um.
+function exclusivePrefixes(scope: string): string[] {
+  const alheios = new Set(
+    scopeNames()
+      .filter((s) => s !== scope)
+      .flatMap((s) => scopePaths(s))
+  );
+  return scopePaths(scope).filter((p) => !alheios.has(p));
 }
 
 function scopeForPaths(paths: string[]): string | null {
@@ -2237,15 +2260,33 @@ function scopeForPaths(paths: string[]): string | null {
       if (paths.some((p) => p.startsWith(prefix))) hits.add(scope);
     }
   }
-  // app/tests/ pertence a dois escopos por construção — desempata pelo escopo exclusivo.
-  const exclusive = [...hits].filter((s) => paths.some((p) => scopePaths(s).some((pre) => pre.startsWith("app/plataformas/") && p.startsWith(pre))));
+  // Um prefixo compartilhado entre escopos (um diretório de testes comum) faz os paths baterem em
+  // vários: desempata pelo escopo que tem prefixo exclusivo casando. A regra é derivada da própria
+  // config, não de uma convenção de diretório — qualquer layout de repositório serve.
+  const exclusive = [...hits].filter((s) =>
+    paths.some((p) => exclusivePrefixes(s).some((pre) => p.startsWith(pre)))
+  );
   if (exclusive.length === 1) return exclusive[0];
   if (hits.size === 1) return [...hits][0];
   return null;
 }
 
+// Caminho de arquivo -> módulo pontilhado, para `missing_module` do gate de RED. O prefixo a
+// descartar é a raiz de import do repositório, que varia (`app/`, `src/`, nenhuma): usa o maior
+// prefixo declarado em `scopes` que não seja ele mesmo um pacote, e por isso sai da config.
 function dottedModule(p: string): string {
-  return p.replace(/^app\//, "").replace(/\.py$/, "").replace(/\//g, ".");
+  const raizes = [...new Set(scopeNames().flatMap((s) => scopePaths(s)))]
+    .map((pre) => pre.split("/")[0])
+    .filter((r) => r && !fs.existsSync(path.join(REPO_ROOT, r, "__init__.py")))
+    .sort((a, b) => b.length - a.length);
+  let rel = p;
+  for (const r of raizes) {
+    if (rel.startsWith(`${r}/`)) {
+      rel = rel.slice(r.length + 1);
+      break;
+    }
+  }
+  return rel.replace(/\.py$/, "").replace(/\//g, ".");
 }
 
 function cmdScaffoldPacket(args: string[]): void {
@@ -2373,9 +2414,9 @@ function autorunLogDir(key: string): string {
 // Sessão headless que implementa UMA fase dentro do worktree da spec. O modelo aqui é o barato
 // (sonnet por padrão): o contexto dele é o packet daquela fase, e o hook PreToolUse do harness
 // continua valendo porque o cwd é o worktree com execução ativa.
-// A documentação do repositório é lida sob demanda pela sessão da fase, e é o item mais caro do
-// contexto: reler os oito docs do apps-dados custa ~36k tokens, que o cache reenvia em TODO turno
-// da fase — na spec 01 de movimentação BTG isso foi ~70% de 30,5M tokens. A allowlist diz a cada
+// A documentação do repositório é lida sob demanda pela sessão da fase, e ler documentação larga
+// é o item mais caro do contexto: medido num repositório Django com oito docs, a cadeia inteira
+// custava ~36k tokens por fase. A allowlist diz a cada
 // fase quais docs importam para ela: RED só escreve teste e não precisa do doc de deploy nem do de
 // admin. Sem `docs.por_fase` no perfil, nada é injetado e o prompt fica como era.
 function blocoDeDocsDaFase(phase: Phase): string {
@@ -2389,10 +2430,10 @@ function blocoDeDocsDaFase(phase: Phase): string {
   );
 }
 
-// Falha de ambiente não é enigma a resolver. Na spec 01 de movimentação BTG o comando de teste
-// saiu 127 (o wrapper estava no .gitignore, então não existia no worktree) e a sessão gastou 67
-// turnos e 8,9M tokens — 29% do custo da spec inteira — rodando `find /`, `git ls-files` e
-// `cat pytest.ini` atrás do arquivo. O modelo não tem como consertar isso de dentro do worktree:
+// Falha de ambiente não é enigma a resolver. Medido numa spec real: o comando de teste saiu 127
+// (o wrapper estava no .gitignore, então não existia no worktree) e a sessão gastou 67 turnos
+// atrás do arquivo com `find /`, `git ls-files` e `cat pytest.ini` — quase um terço do custo da
+// spec. O modelo não tem como consertar isso de dentro do worktree:
 // quem monta o worktree é o harness. Abortar cedo devolve o controle a quem pode corrigir.
 const BLOCO_FALHA_DE_AMBIENTE =
   "\n\nSe o comando de teste sair 126 ou 127 (comando não encontrado / sem permissão), ou se o " +
@@ -2402,8 +2443,8 @@ const BLOCO_FALHA_DE_AMBIENTE =
   "invente comando alternativo, não instale nada.";
 
 // Os arquivos que a sessão precisa ler para acertar o padrão do repositório. Sem isso a fase
-// descobre sozinha onde as coisas ficam: na spec 01 foram ~64 chamadas de Read/Grep/Glob/ls só
-// para orientação, e cada fase pagou de novo porque RED, GREEN e VERIFY não compartilham contexto.
+// descobre sozinha onde as coisas ficam: numa spec real foram ~64 chamadas de Read/Grep/Glob/ls
+// só para orientação.
 // `capabilities.read.paths` é permissão ("você PODE ler"), o que é diferente de instrução
 // ("leia ISTO, é o padrão a seguir") — daí o bloco sair de `required_reads`.
 function blocoDeArquivosDeReferencia(packet: Packet): string {
@@ -2507,8 +2548,9 @@ function runImplementer(
     args.push(retomando ? "--resume" : "--session-id", run.session_id);
   }
 
-  // Corte de desperdício puro: nada aqui remove instrução que o modelo use. Medido no apps-dados,
-  // o piso do 1o turno cai de 38.115 para 32.365 tokens — e some o ruído do hook do terminal.
+  // Corte de desperdício puro: nada aqui remove instrução que o modelo use. Medido num repositório
+  // Django real, o piso do 1o turno cai de 38.115 para 32.365 tokens — e some o ruído do hook do
+  // terminal.
   // `implementer.system_prompt` derruba para ~23.640, mas substitui as diretrizes de ferramenta
   // do Claude Code: é troca de qualidade por token, então fica desligado por padrão.
   if (cfg.lean_context !== false) {
@@ -2768,7 +2810,9 @@ function diretorioDeTestesRaiz(): string | null {
 // certa é "domínio", não "repo". Sem contêiner reconhecível, devolve um escopo só e registra pendência.
 function detectaScopes(exts: string[], pendencias: string[]): Record<string, { paths: string[] }> {
   const testesRaiz = diretorioDeTestesRaiz();
-  const conteineres = ["app/plataformas", "app/domains", "src/domains", "src/modules", "apps", "packages", "services", "src", "app"];
+  // Candidatos de contêiner de domínios, do mais específico para o mais genérico — a ordem é a
+  // precedência da detecção. A lista é de convenções conhecidas, nenhuma privilegiada.
+  const conteineres = ["src/modules", "src/domains", "app/domains", "app/plataformas", "apps", "packages", "services", "src", "app"];
   for (const cont of conteineres) {
     if (!repoTem(cont)) continue;
     const filhos = subdiretorios(cont).filter((f) => temArquivoComExtensao(`${cont}/${f}`, exts));
@@ -2785,7 +2829,7 @@ function detectaScopes(exts: string[], pendencias: string[]): Record<string, { p
   const raiz = raizDeCodigo(exts);
   const nome = path.basename(REPO_ROOT).replace(/[^a-zA-Z0-9_]/g, "_");
   pendencias.push(
-    "scopes: não achei um contêiner de domínios (app/plataformas, src/modules, packages...) — " +
+    "scopes: não achei um contêiner de domínios (src/modules, src/domains, packages, apps...) — " +
       `gerei um escopo único '${nome}'. Divida em escopos reais se o repo tiver domínios separados: ` +
       "uma spec toca UM escopo, e é isso que impede uma spec de atravessar domínios."
   );
@@ -2801,7 +2845,14 @@ function detectaTestCommand(linguagem: string, pendencias: string[]): string | n
       if (!repoTem(f)) continue;
       const txt = fs.readFileSync(path.join(REPO_ROOT, f), "utf-8");
       if (/addopts[^\n]*--cov/.test(txt)) flags += " --no-cov";
-      if (/markers\s*=/.test(txt) && /llm_integration/.test(txt)) flags += ' -m "not llm_integration"';
+      // Qual marcador deve ficar fora do gate por spec (integração, e2e, lento) é escolha do
+      // repositório, e o nome varia. Adivinhar excluiria teste que deveria rodar; fica pendência.
+      if (/markers\s*=/.test(txt)) {
+        pendencias.push(
+          `scaffold.test_command_template: ${f} declara markers do pytest — se algum deve ficar ` +
+            "fora do gate por spec (integração, e2e, lento), acrescente -m \"not <marcador>\" ao comando."
+        );
+      }
       break;
     }
     return `pytest ${flags} {test_paths}`.replace(/\s+/g, " ").replace(" {test_paths}", " {test_paths}");
@@ -3126,7 +3177,7 @@ function diagnostico(): Problema[] {
   } else {
     // O worktree da spec nasce da BRANCH, não da árvore de trabalho: um comando de teste que
     // aponta para arquivo do repo não rastreado pelo git simplesmente não existe lá, e a fase
-    // morre com exit 127. Foi o que aconteceu na spec 01 de movimentação BTG — `.claude/` estava
+    // morre com exit 127. Foi o que aconteceu numa spec real — `.claude/` estava
     // no .gitignore — e custou 67 turnos de busca antes de alguém perceber. `copy_paths` e
     // `link_paths` são a saída legítima para o que é da máquina (um .env), então valem como
     // cobertura.

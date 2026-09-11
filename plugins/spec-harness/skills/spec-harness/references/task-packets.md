@@ -66,36 +66,39 @@ harness recusa como RED. Por isso a falha esperada é declarada:
 
 ~~~yaml
 red_expects: new_module
-missing_module: plataformas.ata_agente.smoke_dummy
+missing_module: faturamento.ledger
 ~~~
 
 O gate passa a exigir exit 1, `failed` e o nome exato do módulo na saída. O teste precisa
 importar **dentro do corpo**:
 
 ~~~python
-def test_normaliza_titulo_colapsa_espacos() -> None:
-    from plataformas.ata_agente.smoke_dummy import normaliza_titulo   # import DENTRO do teste
+def test_registrar_lancamento_devolve_entrada() -> None:
+    from faturamento.ledger import registrar_lancamento   # import DENTRO do teste
 
-    assert normaliza_titulo("  a   b ") == "a b"
+    assert registrar_lancamento(lancamento).valor == 100
 ~~~
 
 Quando a spec altera comportamento de código **já existente** — o caso comum — use
 `red_expects: behavior_change` (padrão): import no topo, assert que falha, e o gate proíbe
 qualquer `ModuleNotFoundError`/`ImportError`/`SyntaxError` na saída.
 
-## Comando de teste — `--no-cov` obrigatório
+## Comando de teste
+
+Sai de `scaffold.test_command_template` do `harness.config.json`. Em pytest, tipicamente:
 
 ~~~yaml
-test_command: pytest -q --no-cov -p no:cacheprovider app/plataformas/<dominio>/tests/unit/test_x.py -m "not llm_integration"
+test_command: pytest -q --no-cov -p no:cacheprovider <prefixo-de-teste>/test_x.py
 ~~~
 
-O `addopts` do `pytest.ini` inclui `--cov-fail-under=80` medindo `app/` inteiro: sem `--no-cov`,
-qualquer execução escopada a um arquivo reprova por cobertura com todos os testes verdes.
-`-p no:cacheprovider` evita que o `.pytest_cache` do worktree suje o fingerprint.
+Se o runner do repositório força cobertura mínima na configuração global (um `--cov-fail-under`
+no `addopts`), desligue-a no comando da spec — sem isso, qualquer execução escopada a um arquivo
+reprova por cobertura com todos os testes verdes. `-p no:cacheprovider` evita que o cache do
+runner no worktree suje o fingerprint.
 
 O comando roda o(s) arquivo(s) **da própria spec**, nunca a suíte inteira: rodar tudo em cada
 fase de cada spec é lento e mistura falhas alheias no gate desta. A suíte completa e a cobertura
-são gate do PR (`.github/workflows/automated_tests.yaml`).
+de projeto são gate do PR.
 
 ## Artefatos
 
@@ -106,7 +109,7 @@ não é observável pelo teste (um ADR que precisa existir, um logger obrigatór
 phases:
   green:
     artifacts:
-      - path: app/plataformas/<dominio>/service.py
+      - path: <prefixo-de-producao-do-escopo>/service.py
         requirements: [RF-01]
         contains: ["logger."]
         min_count: 1
@@ -131,7 +134,7 @@ required_reads:
 
 Um DTO usado por mais de um domínio não é redigitado em cada um. Vira uma spec própria escopada
 em `app/shared/models/**`, com `app: shared`, e as specs dependentes leem a seção `## Contratos`
-dela. Um packet que listasse `app/plataformas/<outro>/` fora do seu `app` é reprovado na
+dela. Um packet que listasse prefixo exclusivo de outro escopo, fora do seu `app`, é reprovado na
 validação — é a regra de dependências do `CLAUDE.md` aplicada ao harness.
 
 ## Orçamento de leitura

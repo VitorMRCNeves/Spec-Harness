@@ -159,9 +159,9 @@ plugins/spec-harness/
 | Arquivo | Quem escreve | O que guarda |
 |---|---|---|
 | `.claude/spec_harness/harness.config.json` | `harness.ts init-repo` | Escopos, extensões, validadores, comando de teste, CRAP, revisão automática |
-| `.claude/sdd/perfil.md` | Fase -2 da skill `sdd` | Tipo de projeto, camadas, unidade de entrega, padrões obrigatórios, níveis de teste, integrações |
+| `.claude/sdd/perfil.md` | Fase 1 da skill `sdd` | Tipo de projeto, camadas, unidade de entrega, padrões obrigatórios, níveis de teste, integrações |
 
-Eles se reforçam: se o harness já foi inicializado, a Fase -2 do `sdd` lê os `scopes` dele em vez
+Eles se reforçam: se o harness já foi inicializado, a Fase 1 do `sdd` lê os `scopes` dele em vez
 de perguntar de novo — escopo declarado num é escopo no outro.
 
 ### O que o `init-repo` detecta sozinho
@@ -271,10 +271,10 @@ template deixa `null` e documenta; ligue quando a base sustentar.
 
 **10. O perfil do `sdd` envelhece.**
 `.claude/sdd/perfil.md` é uma fotografia do repositório no dia em que foi gerado. Quando a
-estrutura mudar, rode `/sdd --setup` — a Fase 2 avisa se encontrar contradição entre o perfil e o
+estrutura mudar, rode `/sdd --setup` — a Fase 5 avisa se encontrar contradição entre o perfil e o
 código, mas ela só roda dentro de um SDD.
 
-**11. A skill `sdd` depende de uma skill de grilling para a Fase -1.**
+**11. A skill `sdd` depende de uma skill de grilling para a Fase 2.**
 Sem uma instalada (ex.: `grilling`, do plugin `mattpocock-skills`), ela conduz a entrevista
 sozinha, em rounds — funciona, mas é mais fraco que a skill dedicada. A busca de ticket é
 opcional e delegada ao que existir no ambiente (skill do rastreador, MCP ou `gh`).

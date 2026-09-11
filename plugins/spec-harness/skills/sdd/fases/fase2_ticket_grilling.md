@@ -1,6 +1,6 @@
-# Fase -1 — Ticket (opcional) + Grilling
+# Fase 2 — Ticket (opcional) + Grilling
 
-Esta fase roda antes da Fase 0. Ela tem dois passos: (1) buscar o ticket no rastreador de issues,
+Esta fase roda antes da Fase 3. Ela tem dois passos: (1) buscar o ticket no rastreador de issues,
 se o usuário passou uma referência, e (2) entrevistar o usuário até a ideia estar afiada o
 suficiente para virar spec.
 
@@ -12,7 +12,7 @@ Se lá estiver "nenhum", pule direto para `-1.3`.
 
 ---
 
-## -1.0 — Checar colisão com pasta SDD existente
+## 2.0 — Checar colisão com pasta SDD existente
 
 Antes de qualquer coisa, derive um slug provisório da feature (do texto de `$ARGUMENTS` ou da
 chave do ticket) e verifique se já existe pasta para ela:
@@ -31,7 +31,7 @@ Se encontrar, **não sobrescreva silenciosamente**. Use `AskUserQuestion` para o
 
 Só prossiga depois dessa decisão.
 
-## -1.1 — Detectar referência de ticket em `$ARGUMENTS`
+## 2.1 — Detectar referência de ticket em `$ARGUMENTS`
 
 - **Chave de issue:** padrão `[A-Z][A-Z0-9]+-\d+` (ex.: `ABC-1234`). Se vier só o número, use o
   prefixo de projeto registrado no perfil do repositório; se o perfil não declarar nenhum,
@@ -40,7 +40,7 @@ Só prossiga depois dessa decisão.
 
 Sem nenhum dos dois, **não há ticket**: vá para `-1.3` usando `$ARGUMENTS` como a ideia solta.
 
-## -1.2 — Buscar a história (se detectada)
+## 2.2 — Buscar a história (se detectada)
 
 Delegue à ferramenta que o ambiente já tiver, nesta ordem de preferência:
 
@@ -62,7 +62,7 @@ livre.
 **Nunca invente conteúdo do ticket.** Campo ausente (critério de aceite, por exemplo) é campo
 ausente — não preencha com suposição.
 
-## -1.3 — Grilling
+## 2.3 — Grilling
 
 Chame a skill de grilling disponível (ex.: `grilling`, do plugin `mattpocock-skills`) passando
 como semente:
@@ -86,17 +86,17 @@ pule esta etapa — é ela que evita spec construída sobre premissa errada.
 **Critério de saída:** a entrevista termina quando não sobra pergunta aberta relevante e o
 usuário confirma o entendimento compartilhado. Não corte por conta própria achando que "já deu".
 
-## -1.4 — Levar o resultado para a Fase 0
+## 2.4 — Levar o resultado para a Fase 3
 
-A entrevista normalmente já resolve boa parte das perguntas obrigatórias da Fase 0 (objetivo,
-regras de negócio, não-objetivos, tipo de mudança, integrações externas). **Não repita na Fase 0
+A entrevista normalmente já resolve boa parte das perguntas obrigatórias da Fase 3 (objetivo,
+regras de negócio, não-objetivos, tipo de mudança, integrações externas). **Não repita na Fase 3
 o que já foi decidido aqui.**
 
-Ao entrar na Fase 0:
+Ao entrar na Fase 3:
 
 1. Monte um resumo curto do que a entrevista decidiu, mapeando explicitamente para os itens de
-   `fase0_alinhamento.md § 0.1`.
+   `fase3_alinhamento.md § 3.1`.
 2. Pergunte **só o que ficou em aberto** — se a entrevista cobriu tudo, confirme o resumo em vez
    de repetir a bateria.
-3. Se havia ticket, referencie a chave no `descricao_alto_nivel.md` gerado na Fase 4, para
+3. Se havia ticket, referencie a chave no `descricao_alto_nivel.md` gerado na Fase 8, para
    rastreabilidade.

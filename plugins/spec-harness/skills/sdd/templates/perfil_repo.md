@@ -1,6 +1,6 @@
 # Perfil do repositório — SDD
 
-> Gerado pela Fase -2 da skill `sdd` em <data>. Descreve **este repositório** para que as specs
+> Gerado pela Fase 1 da skill `sdd` em <data>. Descreve **este repositório** para que as specs
 > nasçam implementáveis. Versione este arquivo. Para refazer: rode a skill com `--setup` ou
 > apague este arquivo.
 >

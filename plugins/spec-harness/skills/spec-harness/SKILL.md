@@ -213,12 +213,32 @@ A fase VERIFY não tem prompt de implementador de propósito: ela não escreve n
 validadores são rodados pelo próprio harness — uma sessão ali só gastaria tokens para observar
 um resultado já produzido.
 
+## Ondas: rode a onda inteira, não uma spec de cada vez
+
+O `implementacao.md` gerado pela skill `sdd` traz uma **tabela de ondas de paralelização**. Ela
+não é documentação: é o plano de execução. As specs de uma mesma onda não dependem umas das
+outras e têm arquivos de produção disjuntos — exatamente a condição para rodarem em worktrees
+simultâneos.
+
+~~~bash
+node ~/.claude/spec_harness/harness.ts run-parallel \
+  .specs/sdd-<feature>/packets/SDD-01.yaml \
+  .specs/sdd-<feature>/packets/SDD-02.yaml
+~~~
+
+Disparar uma onda de 3 specs como 3 `autorun` sequenciais custa três vezes o tempo de parede sem
+ganhar nada — o isolamento por worktree já existe para isso. Só caia no `autorun` spec a spec
+quando a onda tiver largura 1.
+
+Se `run-parallel` reclamar de interseção de paths entre duas specs da mesma onda, o erro está no
+corte, não no comando: as duas disputam o mesmo arquivo de produção e deveriam estar em ondas
+diferentes (ou ser uma spec só). Corrija o `implementacao.md` antes de insistir.
+
 ## Modo manual (uma fase por invocação)
 
 `open-packet` / `verify-packet` / `run-spec` continuam existindo, sobre os packets expandidos.
 Servem para depurar uma fase isolada — não para o fluxo normal, que é justamente o vai-e-vem que
-o `autorun` elimina. `run-parallel` roda várias specs sem interseção de paths em worktrees
-simultâneos.
+o `autorun` elimina.
 
 ## Estrutura
 

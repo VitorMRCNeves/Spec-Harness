@@ -4,13 +4,32 @@
 **Autor:** <git config user.name>
 **Data:** <hoje>
 **Escopo:** <escopo do `spec-harness` que esta spec toca — uma spec toca UM escopo>
-**Depende de:** [spec anterior ou "Nenhuma"]
+**Depende de:** [spec da qual esta precisa para rodar os próprios testes, ou "Nenhuma"]
+**Onda:** <número da onda de paralelização em `implementacao.md`>
 
 ---
 
 ## Resumo
 
-[1–3 frases. O que esta spec entrega? Por que é uma unidade separada?]
+[1–3 frases. Qual **comportamento observável** esta spec passa a habilitar? Escreva do ponto de
+vista de quem consome — usuário, sistema chamador, job a jusante — não do artefato criado.]
+
+---
+
+## Prova de independência
+
+> Uma frase: a ação que prova que esta spec funciona **sozinha**, sem a próxima existir. É o que
+> um humano faz para aprovar a spec sem ler código.
+>
+> Se esta frase não sai, a spec não é uma fatia vertical — é uma camada disfarçada. Pare e
+> refaça o corte pelo comportamento (`fases/fase7_fatiamento.md § 7.2`) antes de continuar.
+>
+> **Exceção:** spec de substrato compartilhado (tipo/contrato/migration que duas outras specs
+> exigem antes de existirem). Nesse caso escreva "Substrato — consumida por <specs>" e explique
+> em *Contexto* por que não coube dentro da primeira fatia que a usa. No máximo duas dessas por
+> entrega.
+
+[Ex.: "Envia dois PDFs em momentos diferentes e confirma que viram dois lotes distintos."]
 
 ---
 

@@ -1,10 +1,16 @@
 ---
 name: spec-harness
-description: Executa specs Markdown produzidas pela skill SDD em qualquer repositório. Um packet unificado por spec, gerado a partir da própria spec, e um único comando (autorun) que encadeia RED→GREEN→VERIFY em subagentes sonnet sem devolver o controle entre as fases. O motor é global (~/.claude/spec_harness) e o perfil (escopos, validadores, comando de teste) vem do .claude/spec_harness/harness.config.json do repo. Use depois que a pasta SDD da feature já existir (.specs/sdd-<feature>/).
+description: Executa specs SDD existentes em worktrees com ciclos RED, GREEN e VERIFY, gates de teste e auditoria de paths. Use depois de gerar a pasta de specs da feature.
 allowed-tools: [Read, Glob, Grep, Bash, Write, Edit]
 ---
 
 # SDD Spec Harness
+
+## Execução no Codex
+
+Se o agente atual for Codex, leia `../../CODEX.md` antes das etapas abaixo. Esse guia adapta os comandos, ferramentas e garantias específicas do Claude descritas neste documento. No Codex, o motor usa `codex exec`; as instruções de hooks Claude não se aplicam.
+
+
 
 Etapa operacional da skill `sdd`, que vem no mesmo plugin: ela quebra a entrega em specs
 construíveis, esta aqui as implementa. Não crie uma segunda definição da feature — a spec

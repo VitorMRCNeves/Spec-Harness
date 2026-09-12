@@ -1,11 +1,16 @@
 ---
 name: sdd
-description: Quebra uma entrega em specs construíveis — documentos de Spec-Driven Design, um por unidade implementável e testável. Use quando o usuário quiser especificar antes de implementar, pedir "escreve um spec", "cria um SDD", "spec-driven design", "planejar essa feature/tarefa antes de codar", ou quiser fixar contratos e casos de teste antes do código. Aceita descrição livre OU referência a um ticket (chave tipo ABC-1234 ou link do rastreador). Na primeira execução num repositório, escaneia o projeto (e pergunta o que não conseguir inferir) para gravar .claude/sdd/perfil.md. Em entrega grande, roda uma fase opcional de pesquisa de padrões de mercado e design de arquitetura que grava design.md. Produz .specs/sdd-<feature>/ com descricao_alto_nivel.md, implementacao.md (com ondas de paralelização), progresso.md e specs/NN-<nome>.md — cada spec uma fatia vertical — consumidos depois pela skill 'spec-harness', que implementa cada spec com enforcement.
-argument-hint: <descrição da feature | chave/link do ticket | --setup>
+description: Planeja entregas em specs implementáveis e testáveis com contratos e casos de aceite. Use para especificar uma feature antes de codar ou preparar o perfil SDD de um repositório.
 allowed-tools: [Read, Glob, Grep, Bash, Agent, AskUserQuestion, Write, Skill, WebSearch, WebFetch]
 ---
 
 # Spec-Driven Design (SDD) — Orquestrador
+
+## Execução no Codex
+
+Se o agente atual for Codex, leia `../../CODEX.md` antes das etapas abaixo. Esse guia adapta os comandos, ferramentas e garantias específicas do Claude descritas neste documento. No Codex, o motor usa `codex exec`; as instruções de hooks Claude não se aplicam.
+
+
 
 Você está quebrando uma entrega em **specs construíveis**: cada uma é a menor mudança que dá
 para implementar e provar com teste, com contrato explícito e critérios de aceite verificáveis.

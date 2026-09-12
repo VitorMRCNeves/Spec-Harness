@@ -7,7 +7,7 @@
  * Neste repositório o perfil é Python/FastAPI/LangGraph (ruff + pytest).
  *
  * Subcomandos:
- *   init-repo [--force]              (detecta o perfil do repo, cria a config e registra o hook)
+ *   init-repo [--force] [--agent claude|codex]              (detecta o perfil do repo, cria a config e registra o hook)
  *   doctor [--json]                  (diagnóstico da config do repo: ERRO bloqueia, AVISO degrada)
  *   validate-spec <spec.md>
  *   validate-packet <packet.yaml>
@@ -33,6 +33,7 @@
  */
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { runCodex } from "./codex-runner.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -41,7 +42,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 const USAGE = `Subcomandos:
-    init-repo [--force]              (detecta o perfil do repo, escreve
+    init-repo [--force] [--agent claude|codex]              (detecta o perfil do repo, escreve
                                       .claude/spec_harness/harness.config.json e registra o hook)
     doctor [--json]                  (diz o que falta configurar neste repo, campo a campo)
     validate-spec <spec.md>
@@ -232,6 +233,7 @@ interface DocsConfig {
 }
 
 interface HarnessConfig {
+  agent?: "claude" | "codex";
   docs?: DocsConfig;
   scaffold?: ScaffoldConfig;
   scopes?: Record<string, { paths?: string[] } | string>;
@@ -814,7 +816,9 @@ function cmdOpenPacket(args: string[]): void {
     const readPaths = packet.capabilities?.read?.paths ?? [];
     run.capabilities = { read: readPaths, write: writePaths, bash: packet.capabilities?.bash?.commands ?? [] };
     run.enforcement = packet.enforcement?.blocked_tool_calls ?? "review";
-    run.baseline = fingerprint(run.worktree, [...new Set([...readPaths, ...writePaths])]);
+    run.baseline = agentProvider() === "codex"
+      ? auditTree(run.worktree)
+      : fingerprint(run.worktree, [...new Set([...readPaths, ...writePaths])]);
     saveRun(run);
     saveActive(key, run.run_id);
   }
@@ -832,11 +836,30 @@ function cmdOpenPacket(args: string[]): void {
 
 // --------------------------------------------------------------------------- verify-packet
 
+// Codex has no Claude PreToolUse guard: include every tracked and non-ignored new file,
+// not just the packet's allowlist. Include modes, symlinks and deletions in the comparison.
+function auditTree(worktree: string): Record<string, string> {
+  const files = execFileSync("git", ["-C", worktree, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf-8" });
+  const result: Record<string, string> = {};
+  for (const rel of new Set(files.split("\0").filter(Boolean))) {
+    const abs = path.join(worktree, rel);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(abs); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) result[rel] = `link:${fs.readlinkSync(abs)}`;
+    else if (stat.isFile()) result[rel] = `${stat.mode & 0o777}:${sha256(abs)}`;
+  }
+  return result;
+}
+
 function changedFiles(worktree: string, run: RunState): string[] {
   const baseline = run.baseline ?? {};
   const allPaths = [...new Set([...(run.capabilities?.read ?? []), ...(run.capabilities?.write ?? [])])].sort();
-  const current = fingerprint(worktree, allPaths);
-  return Object.keys(current).filter((p) => baseline[p] !== current[p]);
+  const current = agentProvider() === "codex" ? auditTree(worktree) : fingerprint(worktree, allPaths);
+  return [...new Set([...Object.keys(baseline), ...Object.keys(current)])]
+    .filter((p) => baseline[p] !== current[p]);
 }
 
 function checkArtifacts(worktree: string, artifacts: ArtifactSpec[]): string[] {
@@ -1024,6 +1047,8 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
     global_validation_results: globalResults,
     blocked_tool_calls: blocked,
     enforcement_mode: enforcementMode,
+    agent: agentProvider(),
+    path_enforcement: agentProvider() === "codex" ? "post-phase-audit" : "pre-tool-hook-and-audit",
     errors,
     status: gatesOk ? "ready_for_review" : "failed",
     manual_review: packet.manual_review ?? {},
@@ -1076,7 +1101,7 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
     if (postVerifyConfig().enabled) {
       const { results, errors: reviewErrors } = await runPostVerify(packet, run);
       extra.post_verify = {
-        model: postVerifyConfig().model ?? "sonnet",
+        model: postVerifyConfig().model ?? (agentProvider() === "codex" ? "Codex default" : "sonnet"),
         gate: postVerifyConfig().gate ?? "warn",
         review_dir: path.relative(REPO_ROOT, reviewDir),
         results,
@@ -1504,6 +1529,15 @@ function runClaudeJob(
   cfg: PostVerifyConfig,
   logPath: string
 ): Promise<PostVerifyResult> {
+  if (agentProvider() === "codex") {
+    if (job.plugin_dirs?.length || job.add_dirs?.length) {
+      die(`job ${job.id}: Codex não traduz plugin_dirs/add_dirs do Claude; configure um prompt autocontido.`);
+    }
+    return runCodex({ cwd: REPO_ROOT, prompt: interpolate(job.prompt, vars), logPath,
+      model: cfg.model, timeout_ms: cfg.timeout_ms }).then((code) => ({
+        id: job.id, returncode: code, log: logPath, artifacts_dir: vars.out, blocking_findings: 0,
+      }));
+  }
   const args = [
     "-p",
     interpolate(job.prompt, vars),
@@ -1617,7 +1651,7 @@ async function runPostVerify(
   };
 
   console.log(
-    `\nRevisão automática pós-VERIFY (${cfg.model ?? "sonnet"}, ${jobs.length} agentes em paralelo): ` +
+    `\nRevisão automática pós-VERIFY (${cfg.model ?? (agentProvider() === "codex" ? "Codex default" : "sonnet")}, ${jobs.length} agentes em paralelo): ` +
       `${jobs.map((j) => j.id).join(", ")}`
   );
   console.log(`  diff revisado: git diff ${base}...${run.branch}`);
@@ -2389,6 +2423,12 @@ function cmdScaffoldPacket(args: string[]): void {
 
 // --------------------------------------------------------------------------- autorun
 
+function agentProvider(): "claude" | "codex" {
+  const value = process.env.SPEC_HARNESS_AGENT ?? CFG().agent ?? "claude";
+  if (value !== "claude" && value !== "codex") die(`agent inválido: ${value}`);
+  return value;
+}
+
 interface ImplementerConfig {
   model?: string;
   timeout_ms?: number;
@@ -2488,8 +2528,8 @@ function runImplementer(
   // sessão sem instrução de fase — inclusive sem a fronteira de escrita nova. Nesse caso o
   // reaproveitamento se desliga sozinho e o comportamento volta ao de antes: um upgrade do motor
   // não pode quebrar um repositório já configurado, nem afrouxar o enforcement em silêncio.
-  const reuse = cfg.reuse_session !== false && Boolean(cfg.prompts?.retomada);
-  if (cfg.reuse_session !== false && !cfg.prompts?.retomada) {
+  const reuse = agentProvider() === "claude" && cfg.reuse_session !== false && Boolean(cfg.prompts?.retomada);
+  if (agentProvider() === "claude" && cfg.reuse_session !== false && !cfg.prompts?.retomada) {
     console.log(
       `  AVISO: implementer.prompts.retomada ausente em ${path.relative(REPO_ROOT, CONFIG_PATH)} — ` +
         `cada fase abrirá sessão fria. Copie o prompt do template para reaproveitar a sessão.`
@@ -2526,6 +2566,11 @@ function runImplementer(
       blocoDeArquivosDeReferencia(packet) +
       blocoDeDocsDaFase(phase) +
       BLOCO_FALHA_DE_AMBIENTE;
+
+  if (agentProvider() === "codex") {
+    console.log("  Codex: sandbox workspace-write; paths auditados ao final da fase, sem hook preventivo de leitura/escrita.");
+    return runCodex({ cwd: run.worktree, prompt, logPath, model: cfg.model, timeout_ms: cfg.timeout_ms });
+  }
 
   const args = [
     "-p",
@@ -2632,6 +2677,9 @@ async function cmdAutorun(args: string[]): Promise<void> {
       const t0 = Date.now();
       const retomou = usaImplementador && Boolean(run.session_id);
       const code = usaImplementador ? await runImplementer(phase, packet, run, feedback, logPath) : 0;
+      if (agentProvider() === "codex" && code !== 0) {
+        die(`Codex terminou com exit ${code} na fase ${phase}; nenhuma aprovação concedida. Veja ${logPath}`);
+      }
       const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
       if (usaImplementador) {
         console.log(
@@ -3050,6 +3098,9 @@ function aplicaDeteccao(perfil: PerfilJson, d: Deteccao): PerfilJson {
 
 function cmdInitRepo(args: string[]): void {
   const force = args.includes("--force");
+  const agentIndex = args.indexOf("--agent");
+  const selectedAgent = agentIndex >= 0 ? args[agentIndex + 1] : process.env.SPEC_HARNESS_AGENT ?? "claude";
+  if (!["claude", "codex"].includes(selectedAgent)) die("init-repo --agent deve ser claude ou codex");
   const template = path.join(HARNESS_DIR, "templates", "harness.config.template.json");
   if (!fs.existsSync(template)) die(`template não encontrado: ${template}`);
 
@@ -3063,6 +3114,18 @@ function cmdInitRepo(args: string[]): void {
     console.log("Detectando o perfil do repositório...");
     const d = detectaPerfil();
     const perfil = aplicaDeteccao(JSON.parse(fs.readFileSync(template, "utf-8")) as PerfilJson, d);
+    perfil.agent = selectedAgent;
+    if (selectedAgent === "codex") {
+      const implementer = perfil.implementer as Record<string, unknown>;
+      delete implementer.model;
+      implementer.reuse_session = false;
+      perfil.post_verify = {
+        enabled: true, gate: "block", require_quiz_pass: false,
+        jobs: [{ id: "code_review", prompt: "Revise git diff {base}...{branch} para a spec {spec}. Leia AGENTS.md. Avalie bugs, contratos e testes. Grave {out}/code-review.json com {\"findings\":[{\"blocking\":true,\"description\":\"problema concreto\"}]}; se não houver achados, findings deve ser []. Não edite código de produção nem testes e não faça commits." }],
+      };
+      const wt = perfil.worktree as { copy_paths?: string[] };
+      wt.copy_paths = (wt.copy_paths ?? []).filter(p => p !== ".claude/settings.json");
+    }
     fs.mkdirSync(destDir, { recursive: true });
     fs.writeFileSync(dest, JSON.stringify(perfil, null, 2) + "\n", "utf-8");
     console.log(`Config ${jaExiste ? "regerada" : "criada"}: ${path.relative(REPO_ROOT, dest)}`);
@@ -3074,7 +3137,9 @@ function cmdInitRepo(args: string[]): void {
     console.log(`  cognitive_loop: ${d.cognitive_loop_dir ?? "job removido (plugin não encontrado)"}`);
   }
 
-  if (PLUGIN_ROOT && !args.includes("--hook")) {
+  if (agentProvider() === "codex") {
+    console.log("Codex: controle de paths por auditoria pós-fase; hook Claude não instalado.");
+  } else if (PLUGIN_ROOT && !args.includes("--hook")) {
     console.log(
       "Hook PreToolUse: fornecido pelo plugin (hooks/hooks.json) — nada a registrar neste repo. " +
         "Use --hook para registrar mesmo assim."
@@ -3203,7 +3268,7 @@ function diagnostico(): Problema[] {
   }
 
   const copyPaths = cfg.worktree?.copy_paths ?? [];
-  if (!copyPaths.includes(".claude/settings.json")) {
+  if (agentProvider() === "claude" && !copyPaths.includes(".claude/settings.json")) {
     if (PLUGIN_ROOT) {
       add("AVISO", "worktree.copy_paths", "sem '.claude/settings.json' — ok: o hook vem do plugin e vale em qualquer diretório, inclusive no worktree.");
     } else {
@@ -3215,7 +3280,10 @@ function diagnostico(): Problema[] {
   }
 
   const settingsPath = path.join(REPO_ROOT, ".claude", "settings.json");
-  if (PLUGIN_ROOT && !fs.existsSync(settingsPath)) {
+  if (agentProvider() === "codex") {
+    add("AVISO", "hook", "Codex usa sandbox workspace-write e auditoria pós-fase; não há bloqueio preventivo de leitura/escrita por packet.");
+    if (!temBinario("codex")) add("ERRO", "agent", "CLI codex não está no PATH.");
+  } else if (PLUGIN_ROOT && !fs.existsSync(settingsPath)) {
     // Hook do plugin vale em toda sessão; o repo não precisa declarar nada.
   } else if (!fs.existsSync(settingsPath)) {
     add("ERRO", "hook", `.claude/settings.json não existe — rode \`${CLI} init-repo\`.`);
@@ -3274,9 +3342,12 @@ function diagnostico(): Problema[] {
 
   const pv = cfg.post_verify ?? {};
   if (pv.enabled) {
-    if (!temBinario("claude")) add("ERRO", "post_verify", "CLI `claude` não está no PATH — os jobs de revisão não rodariam.");
+    if (!temBinario(agentProvider())) add("ERRO", "post_verify", `CLI ${agentProvider()} não está no PATH.`);
     for (const job of pv.jobs ?? []) {
       if (!job.prompt) add("ERRO", `post_verify.${job.id}`, "job sem prompt.");
+      if (agentProvider() === "codex" && (job.plugin_dirs?.length || job.add_dirs?.length)) {
+        add("ERRO", `post_verify.${job.id}`, "Codex exige job autocontido, sem plugin_dirs/add_dirs do Claude.");
+      }
       for (const d of [...(job.add_dirs ?? []), ...(job.plugin_dirs ?? [])]) {
         if (!fs.existsSync(d)) add("ERRO", `post_verify.${job.id}`, `diretório declarado não existe: ${d}`);
       }

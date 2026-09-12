@@ -1,6 +1,6 @@
 # Spec-Harness
 
-Plugin do Claude Code com **duas skills que se encadeiam**:
+Plugin do Claude Code e do Codex com **duas skills que se encadeiam**:
 
 | Skill | O que faz |
 |---|---|
@@ -46,6 +46,13 @@ refeito com `--setup`. Sem ele, as fases seguintes produziriam specs genéricas 
 implementáveis.
 
 ---
+
+## Codex
+
+A integração e suas diferenças de enforcement estão em [plugins/spec-harness/CODEX.md](plugins/spec-harness/CODEX.md).
+O motor aceita `init-repo --agent codex`; as skills são `$sdd` e `$spec-harness`.
+O Codex executa RED/GREEN e revisão via `codex exec`, com auditoria de paths ao final da fase.
+As seções abaixo que citam `/plugin`, `claude`, sonnet e `PreToolUse` descrevem o provedor Claude.
 
 ## Instalação
 
@@ -301,3 +308,15 @@ etapas opcionais vêm do `harness.config.json` do repositório alvo. Se você pr
 ## Licença
 
 MIT — ver [LICENSE](LICENSE).
+
+## Validar a integração Codex
+
+No diretório `plugins/spec-harness/engine`:
+
+```bash
+npm ci --ignore-scripts
+npm run typecheck
+node --test tests/codex.test.mjs
+```
+
+Os seis testes usam um executável Codex simulado, repositórios temporários e testes reais do fixture; não chamam modelos nem consomem créditos. Cobrem o ciclo RED/GREEN/VERIFY com revisão, reprovação por arquivo adicional, falha do processo e inicialização/preservação da configuração. A auditoria Codex compara arquivos versionados e novos não ignorados pelo Git, incluindo exclusões, modos e links simbólicos; não rastreia leituras, alterações transitórias ou novos arquivos ignorados pelo Git.

@@ -120,9 +120,34 @@ Antes de escrever `specs/`, olhe o grafo que você acabou de montar e cheque:
 
 ---
 
+## Gate determinístico — rode antes de mostrar qualquer coisa ao usuário
+
+O motor do `spec-harness` valida a pasta inteira sem abrir sessão de modelo nenhuma:
+
+~~~bash
+node ~/.claude/spec_harness/harness.ts validate-sdd .specs/sdd-<slug>
+~~~
+
+(Se o motor estiver instalado como plugin dentro do repo, use o caminho do repo.)
+
+Ele cobra o que este arquivo pede em prosa e ninguém conferia: cabeçalho completo (`Escopo`,
+`Depende de`, `Onda`), `## Prova de independência` preenchida, IDs `RF-*`/`T-*` presentes, nenhum
+`⚠️ ABERTO:`, blocos `**Produção**`/`**Testes**` com path reconhecível, escopo declarado batendo
+com o escopo em que os paths caem, grafo sem ciclo e sem dependência para onda igual ou posterior,
+tabela do `implementacao.md` idêntica ao cabeçalho de cada spec, limite de duas specs de
+substrato e — a regra que sustenta o `run-parallel` — **nenhuma interseção de arquivos entre
+specs da mesma onda**.
+
+Saída ≠ 0 significa corrigir e rodar de novo, não explicar o erro ao usuário. Os AVISOs (nada
+roda em paralelo, arquivo opcional ausente) são para você julgar: o de largura quase sempre
+manda voltar à Fase 7.2.
+
+---
+
 ## Após gerar todos os arquivos
 
-Imprima a lista de arquivos criados e diga ao usuário:
+Imprima a lista de arquivos criados (e a linha de resumo do `validate-sdd`: *N specs em M ondas;
+a onda mais larga roda K em paralelo*) e diga ao usuário:
 
 > "A pasta SDD está em `.specs/sdd-<slug>/`. Revise os arquivos em `specs/` — cada um é uma
 > unidade de implementação independente. Antes de acionar o `spec-harness`, confirme que os RFs

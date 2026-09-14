@@ -46,6 +46,9 @@ const USAGE = `Subcomandos:
                                       .claude/spec_harness/harness.config.json e registra o hook)
     doctor [--json]                  (diz o que falta configurar neste repo, campo a campo)
     validate-spec <spec.md>
+    validate-sdd <.specs/sdd-<feature>> [--json]
+                                     (valida a pasta SDD inteira: fatiamento, grafo, ondas e a
+                                      disjunção de arquivos que o run-parallel assume)
     validate-packet <packet.yaml>
     scaffold-packet <spec.md> [--force]   (gera o packet unificado SDD-NN.yaml a partir da spec)
     autorun <SDD-NN.yaml> [--max-attempts N] [--no-merge]
@@ -335,6 +338,12 @@ function loadConfig(): HarnessConfig {
 }
 
 // Carregada sob demanda: `init-repo` roda justamente em repositório que ainda não tem config.
+// `validate-sdd` também roda antes dela existir (a skill `sdd` pode vir primeiro), por isso a
+// existência é consultável sem disparar o die() do loadConfig.
+function temConfig(): boolean {
+  return fs.existsSync(CONFIG_PATH);
+}
+
 let CONFIG_CACHE: HarnessConfig | null = null;
 function CFG(): HarnessConfig {
   if (!CONFIG_CACHE) CONFIG_CACHE = loadConfig();
@@ -1080,8 +1089,16 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
   if (changed.length) {
     spawnSync("git", ["-C", worktree, "add", ...changed]);
     const commitMsg = `spec(${run.key}): ${packet.phase} gates ok — ${packet.packet_id}`;
-    spawnSync("git", ["-C", worktree, "commit", "-m", commitMsg]);
-    if (!quiet) console.log(`Commit criado na branch ${run.branch}.`);
+    const r = spawnSync("git", ["-C", worktree, "commit", "-m", commitMsg]);
+    // Com checkpoints ligados o GREEN pode já ter commitado tudo: aí não há o que commitar, e
+    // anunciar um commit que não existe é pior que não anunciar nada.
+    if (!quiet) {
+      console.log(
+        r.status === 0
+          ? `Commit criado na branch ${run.branch}.`
+          : `Nada novo para commitar na branch ${run.branch} — a fase já estava commitada (checkpoints).`
+      );
+    }
   }
 
   // CRAP e revisão automática só fazem sentido sobre a spec inteira já commitada — por isso
@@ -2253,6 +2270,9 @@ function extractSection(text: string, heading: string): string {
 // arquivo em qualquer repositório com outro layout, e o packet tinha de ser escrito à mão.
 function pareceCaminhoDoRepo(tok: string): boolean {
   if (!tok.includes("/") || /\s/.test(tok)) return false;
+  // Sem config (validate-sdd rodando antes do init-repo) o único critério disponível é ter cara
+  // de arquivo. Basta para separar path de prosa nos bullets da seção.
+  if (!temConfig()) return /\.[A-Za-z0-9]+$/.test(tok);
   const prefixos = [...new Set(scopeNames().flatMap((s) => scopePaths(s)))];
   if (prefixos.some((p) => tok.startsWith(p))) return true;
   return sourceExtensions().some((ext) => tok.endsWith(ext));
@@ -2431,6 +2451,7 @@ function agentProvider(): "claude" | "codex" {
 
 interface ImplementerConfig {
   model?: string;
+  green_checkpoints?: boolean;
   timeout_ms?: number;
   permission_mode?: string;
   allowed_tools?: string;
@@ -2516,6 +2537,31 @@ function leanSettingsJson(): string {
   });
 }
 
+// Checkpoint por caso de teste, só na fase GREEN. O commit que VALE continua sendo o do harness,
+// depois dos gates — este aqui existe para o trabalho não evaporar quando o GREEN estoura
+// `max_attempts` numa spec com muitos T-xx, e para o revert dentro da fase ser granular. A
+// decomposição não é nova: é a tabela `Casos de Teste Mínimos` que a spec já tem, e por isso não
+// há uma segunda lista de tarefas para divergir da primeira.
+function blocoDeCheckpoints(phase: Phase, key: string, testCommand: string): string {
+  if (phase !== "green") return "";
+  if (implementerConfig().green_checkpoints === false) return "";
+  return (
+    "\n\nCHECKPOINTS DESTA FASE — isto sobrepõe a instrução \"não commite\" acima, e só ela.\n\n" +
+    "Trabalhe um caso de teste por vez, na ordem da tabela `Casos de Teste Mínimos` da spec. " +
+    `Assim que \`${testCommand}\` passar por causa do T-xx em que você está, commite só ele:\n` +
+    "  git add <apenas os arquivos de produção que VOCÊ editou>\n" +
+    `  git commit -m "spec(${key}): checkpoint T-xx — <o comportamento que passou a valer>"\n\n` +
+    "Limites, sem exceção: nunca `git add -A` nem `git add .`; nunca adicione arquivo de teste " +
+    "(ele é o contrato do RED); nada de branch, rebase, reset, revert, amend, stash, push ou " +
+    "qualquer coisa que reescreva histórico. Você só acrescenta commits nesta branch.\n" +
+    "Estes checkpoints NÃO são o commit da fase: o harness faz o commit final quando os gates " +
+    "passarem, e é ele que conta. Se o gate reprovar, os checkpoints são o que preserva o " +
+    "trabalho para a tentativa seguinte.\n" +
+    "Se a spec tem um T-xx só, ou se os T-xx não passam isoladamente, não force o fatiamento: " +
+    "terminar com um commit só está certo."
+  );
+}
+
 function runImplementer(
   phase: Phase,
   packet: Packet,
@@ -2560,9 +2606,13 @@ function runImplementer(
 
   // Numa retomada o modelo já recebeu estes blocos na primeira invocação da sessão; reenviá-los
   // só acrescentaria contexto novo, que é exatamente o que custa cota.
+  // O bloco de checkpoints vai nas duas formas do prompt: numa retomada ele é justamente a
+  // instrução que MUDOU ao entrar no GREEN, então não é repetição de contexto já visto.
+  const checkpoints = blocoDeCheckpoints(phase, run.key, vars.test_command);
   const prompt = retomando
-    ? interpolate(template, vars)
+    ? interpolate(template, vars) + checkpoints
     : interpolate(template, vars) +
+      checkpoints +
       blocoDeArquivosDeReferencia(packet) +
       blocoDeDocsDaFase(phase) +
       BLOCO_FALHA_DE_AMBIENTE;
@@ -3404,6 +3454,356 @@ function cmdDoctor(args: string[]): void {
   if (problemas.some((p) => p.nivel === "ERRO")) process.exit(1);
 }
 
+// --------------------------------------------------------------------------- validate-sdd
+
+// Valida a pasta que a skill `sdd` produz, antes de qualquer packet existir. O que ela cobra é o
+// que o resto do pipeline assume e nunca verifica: que cada spec é uma fatia com prova de
+// independência, que o grafo declarado nas specs é o mesmo do `implementacao.md`, e — a regra que
+// só aparecia em prosa — que duas specs da mesma onda não escrevem no mesmo lugar. Essa última é
+// a pré-condição do `run-parallel`: sem ela, o conflito só aparece no merge, com os worktrees já
+// gastos.
+
+interface SpecSdd {
+  numero: number;
+  arquivo: string; // relativo ao REPO_ROOT
+  nome: string;
+  escopo: string | null;
+  dependeDe: number[];
+  onda: number | null;
+  prova: string;
+  substrato: boolean;
+  implPaths: string[];
+  testPaths: string[];
+  ids: string[];
+  aberto: boolean;
+  temSecaoArquivos: boolean;
+}
+
+// Um valor de cabeçalho ainda é do template quando veio com `<...>`, com `[...]` ou vazio.
+function ehPlaceholder(v: string): boolean {
+  const s = v.trim();
+  if (!s || s === "—" || s === "-") return true;
+  return /^<.*>$/.test(s) || /^\[.*\]$/.test(s);
+}
+
+function campoDoCabecalho(text: string, rotulo: string): string | null {
+  const re = new RegExp(`^\\*\\*${rotulo}:\\*\\*\\s*(.*)$`, "im");
+  const m = text.match(re);
+  return m ? m[1].trim() : null;
+}
+
+// "01, 02" / "spec 01" / "Nenhuma" / "—" -> lista de números. Texto sem número nenhum é "nenhuma
+// dependência", que é o caso da onda 1.
+function parseDependencias(raw: string | null): number[] {
+  if (!raw || /nenhum|none|^—$|^-$/i.test(raw.trim())) return [];
+  return [...new Set([...raw.matchAll(/\b(\d{1,3})\b/g)].map((m) => Number(m[1])))].sort((a, b) => a - b);
+}
+
+function parseSpecSdd(specPath: string): SpecSdd {
+  const text = fs.readFileSync(specPath, "utf-8");
+  const rel = path.relative(REPO_ROOT, specPath);
+  const numero = Number(path.basename(specPath).match(/^(\d+)-/)?.[1] ?? NaN);
+  const escopoRaw = campoDoCabecalho(text, "Escopo");
+  const ondaRaw = campoDoCabecalho(text, "Onda");
+  const prova = extractSection(text, "Prova de independência")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith(">") && l.trim())
+    .join(" ")
+    .trim();
+
+  const permitidos = extractSection(text, "Arquivos permitidos");
+  const blocos = permitidos ? blocosRotulados(permitidos) : [];
+  const prod = blocos.find((b) => /produ[çc][ãa]o/i.test(b.label));
+  const teste = blocos.find((b) => /teste/i.test(b.label));
+
+  return {
+    numero,
+    arquivo: rel,
+    nome: text.match(/^#\s*Spec\s*\d*\s*[—-]?\s*(.+)$/m)?.[1]?.trim() ?? path.basename(specPath),
+    escopo: escopoRaw && !ehPlaceholder(escopoRaw) ? escopoRaw.replace(/`/g, "").trim() : null,
+    dependeDe: parseDependencias(campoDoCabecalho(text, "Depende de")),
+    onda: ondaRaw && /\d/.test(ondaRaw) ? Number(ondaRaw.match(/\d+/)![0]) : null,
+    prova,
+    substrato: /^substrato/i.test(prova),
+    implPaths: prod?.paths ?? [],
+    testPaths: teste?.paths ?? [],
+    ids: [...new Set([...text.matchAll(ID_PATTERN)].map((m) => m[0]))],
+    aberto: text.includes(ABERTO_MARKER),
+    temSecaoArquivos: !!(prod || teste),
+  };
+}
+
+// Linhas da tabela `## Specs` do implementacao.md. Ela é escrita à mão a partir da mesma tabela
+// da Fase 7 e pode divergir das specs — é o análogo local do cross-check diagrama×definição.
+interface LinhaImplementacao {
+  numero: number;
+  dependeDe: number[];
+  onda: number | null;
+}
+
+function parseImplementacao(dir: string): LinhaImplementacao[] | null {
+  const p = path.join(dir, "implementacao.md");
+  if (!fs.existsSync(p)) return null;
+  const secao = extractSection(fs.readFileSync(p, "utf-8"), "Specs");
+  const linhas: LinhaImplementacao[] = [];
+  for (const line of secao.split("\n")) {
+    if (!line.trim().startsWith("|")) continue;
+    const cels = line.split("|").slice(1, -1).map((c) => c.trim());
+    if (cels.length < 6) continue;
+    const numero = Number(cels[0]);
+    if (!Number.isInteger(numero)) continue;
+    if (/^\[Nome da spec/i.test(cels[1])) continue; // linha de exemplo do template
+    linhas.push({
+      numero,
+      dependeDe: parseDependencias(cels[4]),
+      onda: /\d/.test(cels[5]) ? Number(cels[5].match(/\d+/)![0]) : null,
+    });
+  }
+  return linhas;
+}
+
+// Aqui a comparação é entre arquivos nomeados um a um na spec, não entre os globs de um packet:
+// duas specs podem escrever em arquivos diferentes do mesmo diretório sem conflitar no merge. Por
+// isso path literal é comparado por igualdade (ou contenção de diretório) e só path com wildcard
+// cai no teste de prefixo que o `run-parallel` usa.
+function conflitosDeEscrita(a: string[], b: string[]): string[] {
+  const conflitos: string[] = [];
+  const dentroDe = (arquivo: string, dir: string) => arquivo.startsWith(dir.replace(/\/*$/, "/"));
+  for (const x of a) {
+    for (const y of b) {
+      const temGlob = /[*?[]/.test(x) || /[*?[]/.test(y);
+      const bate = temGlob
+        ? prefixesOverlap(globPrefix(x), globPrefix(y))
+        : x === y || dentroDe(x, y) || dentroDe(y, x);
+      if (bate) conflitos.push(`${x} × ${y}`);
+    }
+  }
+  return conflitos;
+}
+
+function detectaCiclo(specs: SpecSdd[]): number[] | null {
+  const porNum = new Map(specs.map((s) => [s.numero, s]));
+  const estado = new Map<number, 0 | 1 | 2>();
+  const pilha: number[] = [];
+  const visita = (n: number): number[] | null => {
+    if (estado.get(n) === 1) return [...pilha.slice(pilha.indexOf(n)), n];
+    if (estado.get(n) === 2) return null;
+    estado.set(n, 1);
+    pilha.push(n);
+    for (const d of porNum.get(n)?.dependeDe ?? []) {
+      if (!porNum.has(d)) continue;
+      const ciclo = visita(d);
+      if (ciclo) return ciclo;
+    }
+    pilha.pop();
+    estado.set(n, 2);
+    return null;
+  };
+  for (const s of specs) {
+    const ciclo = visita(s.numero);
+    if (ciclo) return ciclo;
+  }
+  return null;
+}
+
+function diagnosticoSdd(dir: string): Problema[] {
+  const problemas: Problema[] = [];
+  const add = (nivel: "ERRO" | "AVISO", campo: string, msg: string) => problemas.push({ nivel, campo, msg });
+
+  const specsDir = path.join(dir, "specs");
+  if (!fs.existsSync(specsDir)) {
+    add("ERRO", "specs/", `não existe em ${path.relative(REPO_ROOT, dir)} — a pasta SDD está incompleta.`);
+    return problemas;
+  }
+  const arquivos = fs
+    .readdirSync(specsDir)
+    .filter((f) => /^\d+-.+\.md$/.test(f))
+    .sort();
+  if (!arquivos.length) {
+    add("ERRO", "specs/", "nenhum arquivo no padrão NN-<nome>.md.");
+    return problemas;
+  }
+
+  const specs = arquivos.map((f) => parseSpecSdd(path.join(specsDir, f)));
+  const escoposConhecidos = temConfig() ? scopeNames() : null;
+
+  // ---- por spec
+  for (const s of specs) {
+    const campo = s.arquivo.replace(/^.*\/specs\//, "specs/");
+    if (!Number.isInteger(s.numero)) add("ERRO", campo, "nome fora do padrão NN-<nome>.md.");
+    if (!s.ids.length) add("ERRO", campo, "nenhum ID RF-*/EC-*/T-* — spec sem requisito verificável.");
+    else if (!s.ids.some((i) => i.startsWith("T-"))) {
+      add("ERRO", campo, "nenhum caso de teste T-* — a fase RED não teria o que escrever.");
+    }
+    if (s.aberto) add("ERRO", campo, `'${ABERTO_MARKER}' pendente — scaffold-packet recusa a spec assim.`);
+    if (!s.temSecaoArquivos) {
+      add("ERRO", campo, "sem blocos **Produção (fase GREEN)**/**Testes (fase RED)** em '## Arquivos permitidos'.");
+    } else {
+      if (!s.implPaths.length) add("ERRO", campo, "bloco de Produção sem nenhum path reconhecido.");
+      if (!s.testPaths.length) add("ERRO", campo, "bloco de Testes sem nenhum path reconhecido.");
+      const testeEmProd = s.implPaths.filter((p) => temConfig() && looksLikeTestPath(p));
+      if (testeEmProd.length) add("AVISO", campo, `path de teste no bloco de Produção: ${testeEmProd.join(", ")}`);
+    }
+    if (!s.prova || ehPlaceholder(s.prova)) {
+      add(
+        "ERRO",
+        campo,
+        "'## Prova de independência' vazia ou ainda no template — sem ela não dá para saber se a spec é fatia ou camada."
+      );
+    }
+    if (s.onda === null) add("ERRO", campo, "cabeçalho sem '**Onda:**'.");
+    if (!s.escopo) add("ERRO", campo, "cabeçalho sem '**Escopo:**' preenchido.");
+    else if (escoposConhecidos && !escoposConhecidos.includes(s.escopo)) {
+      add("ERRO", campo, `escopo '${s.escopo}' não existe em scopes do harness.config.json (${escoposConhecidos.join(", ")}).`);
+    }
+    if (temConfig() && s.implPaths.length) {
+      const inferido = scopeForPaths([...s.implPaths, ...s.testPaths]);
+      if (!inferido) add("AVISO", campo, "paths não resolvem para um escopo único — confira se a spec não cruza escopo.");
+      else if (s.escopo && inferido !== s.escopo) {
+        add("ERRO", campo, `declara escopo '${s.escopo}' mas os paths caem em '${inferido}' — uma spec toca um escopo só.`);
+      }
+    }
+  }
+
+  // ---- grafo
+  const numeros = new Set(specs.map((s) => s.numero));
+  for (const s of specs) {
+    const campo = `specs/${path.basename(s.arquivo)}`;
+    for (const d of s.dependeDe) {
+      if (!numeros.has(d)) {
+        add("ERRO", campo, `'Depende de' aponta para a spec ${padNum(d)}, que não existe nesta pasta.`);
+        continue;
+      }
+      if (d === s.numero) add("ERRO", campo, "spec depende de si mesma.");
+      const dep = specs.find((x) => x.numero === d)!;
+      if (s.onda !== null && dep.onda !== null && s.onda <= dep.onda) {
+        add(
+          "ERRO",
+          campo,
+          `está na onda ${s.onda} e depende da spec ${padNum(d)}, que está na onda ${dep.onda} — dependência tem de ficar numa onda anterior.`
+        );
+      }
+    }
+  }
+  const ciclo = detectaCiclo(specs);
+  if (ciclo) add("ERRO", "grafo", `ciclo de dependência: ${ciclo.map(padNum).join(" -> ")}.`);
+
+  // ---- ondas: a regra que o run-parallel assume
+  const ondas = new Map<number, SpecSdd[]>();
+  for (const s of specs) {
+    if (s.onda === null) continue;
+    if (!ondas.has(s.onda)) ondas.set(s.onda, []);
+    ondas.get(s.onda)!.push(s);
+  }
+  for (const [onda, doGrupo] of [...ondas].sort((a, b) => a[0] - b[0])) {
+    for (let i = 0; i < doGrupo.length; i++) {
+      for (let j = i + 1; j < doGrupo.length; j++) {
+        const [a, b] = [doGrupo[i], doGrupo[j]];
+        for (const [tipo, pa, pb] of [
+          ["produção", a.implPaths, b.implPaths],
+          ["teste", a.testPaths, b.testPaths],
+        ] as Array<[string, string[], string[]]>) {
+          const conflitos = conflitosDeEscrita(pa, pb);
+          if (conflitos.length) {
+            add(
+              "ERRO",
+              `onda ${onda}`,
+              `specs ${padNum(a.numero)} e ${padNum(b.numero)} escrevem nos mesmos arquivos de ${tipo} ` +
+                `(${conflitos.slice(0, 3).join(", ")}${conflitos.length > 3 ? ", …" : ""}) — ` +
+                "não podem rodar no mesmo run-parallel."
+            );
+          }
+        }
+      }
+    }
+  }
+
+  const substratos = specs.filter((s) => s.substrato);
+  if (substratos.length > 2) {
+    add(
+      "ERRO",
+      "fatiamento",
+      `${substratos.length} specs de substrato (${substratos.map((s) => padNum(s.numero)).join(", ")}) — ` +
+        "o limite é 2; acima disso a entrega foi cortada por camada."
+    );
+  }
+  const larguraMax = Math.max(...[...ondas.values()].map((g) => g.length), 0);
+  if (specs.length > 1 && ondas.size === specs.length) {
+    add(
+      "AVISO",
+      "fatiamento",
+      `${specs.length} specs em ${ondas.size} ondas — nada roda em paralelo. Ou a entrega é genuinamente ` +
+        "sequencial, ou o corte foi por camada (Fase 7.2)."
+    );
+  }
+
+  // ---- implementacao.md × specs
+  const linhas = parseImplementacao(dir);
+  if (linhas === null) {
+    add("ERRO", "implementacao.md", "não existe na pasta SDD.");
+  } else {
+    const naTabela = new Set(linhas.map((l) => l.numero));
+    for (const s of specs) {
+      if (!naTabela.has(s.numero)) add("ERRO", "implementacao.md", `spec ${padNum(s.numero)} não aparece na tabela '## Specs'.`);
+    }
+    for (const l of linhas) {
+      if (!numeros.has(l.numero)) {
+        add("ERRO", "implementacao.md", `tabela lista a spec ${padNum(l.numero)}, que não existe em specs/.`);
+        continue;
+      }
+      const s = specs.find((x) => x.numero === l.numero)!;
+      if (l.onda !== null && s.onda !== null && l.onda !== s.onda) {
+        add("ERRO", "implementacao.md", `spec ${padNum(l.numero)}: onda ${l.onda} na tabela, ${s.onda} no cabeçalho da spec.`);
+      }
+      if (l.dependeDe.join(",") !== s.dependeDe.join(",")) {
+        add(
+          "ERRO",
+          "implementacao.md",
+          `spec ${padNum(l.numero)}: 'Depende de' divergente — tabela diz [${l.dependeDe.map(padNum).join(", ") || "—"}], ` +
+            `spec diz [${s.dependeDe.map(padNum).join(", ") || "—"}].`
+        );
+      }
+    }
+  }
+
+  for (const nome of ["descricao_alto_nivel.md", "progresso.md"]) {
+    if (!fs.existsSync(path.join(dir, nome))) add("AVISO", nome, "não existe na pasta SDD.");
+  }
+
+  problemas.push({
+    nivel: "AVISO",
+    campo: "_resumo",
+    msg: `${specs.length} spec(s) em ${ondas.size} onda(s); a onda mais larga roda ${larguraMax} em paralelo.`,
+  });
+  return problemas;
+}
+
+function cmdValidateSdd(args: string[]): void {
+  const alvo = args.find((a) => !a.startsWith("--"));
+  if (!alvo) die(`uso: validate-sdd <.specs/sdd-<feature>> [--json]`);
+  const dir = path.isAbsolute(alvo) ? alvo : path.join(REPO_ROOT, alvo);
+  if (!fs.existsSync(dir)) die(`pasta SDD não encontrada: ${dir}`);
+
+  const problemas = diagnosticoSdd(dir);
+  const resumo = problemas.find((p) => p.campo === "_resumo");
+  const reais = problemas.filter((p) => p.campo !== "_resumo");
+  if (args.includes("--json")) {
+    console.log(JSON.stringify({ dir: path.relative(REPO_ROOT, dir), problemas }, null, 2));
+  } else {
+    for (const p of reais.filter((p) => p.nivel === "ERRO")) console.log(`  ERRO  [${p.campo}] ${p.msg}`);
+    for (const p of reais.filter((p) => p.nivel === "AVISO")) console.log(`  AVISO [${p.campo}] ${p.msg}`);
+    const erros = reais.filter((p) => p.nivel === "ERRO").length;
+    const avisos = reais.length - erros;
+    if (resumo) console.log(`\n${resumo.msg}`);
+    console.log(
+      erros || avisos
+        ? `validate-sdd: ${erros} erro(s), ${avisos} aviso(s) — ${path.relative(REPO_ROOT, dir)}`
+        : `validate-sdd: OK — ${path.relative(REPO_ROOT, dir)}`
+    );
+  }
+  if (reais.some((p) => p.nivel === "ERRO")) process.exit(1);
+}
+
 // --------------------------------------------------------------------------- main
 
 async function main(): Promise<void> {
@@ -3425,6 +3825,7 @@ async function main(): Promise<void> {
     "init-repo": cmdInitRepo,
     doctor: cmdDoctor,
     "validate-spec": cmdValidateSpec,
+    "validate-sdd": cmdValidateSdd,
     "validate-packet": cmdValidatePacket,
     "open-packet": cmdOpenPacket,
     "verify-packet": cmdVerifyPacket,

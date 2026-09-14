@@ -55,6 +55,8 @@
     "timeout_ms": 2400000,
     "permission_mode": "acceptEdits",
     "allowed_tools": "Read Grep Glob Bash Write Edit TodoWrite",
+    "green_checkpoints": true,
+    "_green_checkpoints_comment": "Na fase GREEN, manda a sessão commitar cada caso de teste (T-xx da spec) assim que ele passa. O commit que vale continua sendo o do harness, depois dos gates — o checkpoint existe para o trabalho sobreviver quando o GREEN estoura max_attempts e para o revert dentro da fase ser granular. A decomposição vem da tabela `Casos de Teste Mínimos` da própria spec, não de uma segunda lista de tarefas. Para desligar: false.",
     "max_attempts": 2,
     "_max_attempts_comment": "Tentativas por fase antes de devolver o controle ao orquestrador. A tentativa seguinte recebe os erros do gate como feedback, no lugar de {feedback}.",
     "reuse_session": true,

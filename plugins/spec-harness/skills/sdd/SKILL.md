@@ -99,6 +99,11 @@ antes de executar a fase. Os caminhos são relativos a este diretório de skill.
    quem decide isso é a sessão de grilling.
 12. **Não duplique lógica de outra skill.** Busca de issue e entrevista são delegadas às skills
    correspondentes quando existirem; a Fase 2 só orquestra as chamadas.
-13. **Depois de gerar a pasta**, avise que a implementação acontece via `spec-harness`
+13. **A Fase 8 só termina com `validate-sdd` limpo.** O gate é determinístico e roda no motor do
+    `spec-harness` (`harness.ts validate-sdd .specs/sdd-<slug>`) — ele é quem cobra prova de
+    independência preenchida, grafo sem ciclo, `implementacao.md` batendo com as specs e
+    disjunção de arquivos dentro de cada onda. Não apresente a pasta ao usuário com o gate
+    vermelho.
+14. **Depois de gerar a pasta**, avise que a implementação acontece via `spec-harness`
     (`scaffold-packet` + `autorun`), não escrevendo código direto a partir do SDD — e que as
     specs de uma mesma onda vão juntas em `run-parallel`, não uma de cada vez.

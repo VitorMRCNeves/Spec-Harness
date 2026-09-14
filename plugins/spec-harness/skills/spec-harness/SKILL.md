@@ -66,6 +66,17 @@ julgamento seu:
 Apague cada entrada de `_pendencias` que você resolver e repita o `doctor` até sair limpo. Só
 então rode o primeiro `scaffold-packet`.
 
+## Antes do primeiro packet: a pasta SDD precisa passar no gate
+
+~~~bash
+node ~/.claude/spec_harness/harness.ts validate-sdd .specs/sdd-<feature>
+~~~
+
+O `scaffold-packet` valida uma spec por vez e só o que ele precisa ler. O `validate-sdd` olha a
+entrega inteira: cabeçalhos, prova de independência, grafo, `implementacao.md` × specs e a
+interseção de arquivos dentro de cada onda — que é exatamente a pré-condição do `run-parallel`.
+Rodar depois de um autorun não adianta: o conflito já virou merge.
+
 ## O ciclo (três comandos por spec)
 
 ~~~bash
@@ -85,6 +96,13 @@ saída do pytest, nem os logs das sessões.
 Não leia o diff antes do autorun terminar. O ponto do comando é que as três fases custem uma
 única passagem de contexto no orquestrador; abrir os arquivos no meio desfaz exatamente a
 economia que ele existe para dar.
+
+Dentro do GREEN a sessão commita um checkpoint por caso de teste (`T-xx` da spec) assim que ele
+passa — `implementer.green_checkpoints`, ligado por padrão. Esses commits não substituem o da
+fase: o harness continua commitando depois dos gates, e é esse que conta. Eles existem para o
+trabalho sobreviver quando o GREEN estoura `max_attempts` e para o revert dentro da fase ser
+granular. A decomposição vem da tabela `Casos de Teste Mínimos` que a spec já tem — não há uma
+segunda lista de tarefas para divergir dela.
 
 Se uma fase reprovar nos gates, o harness devolve os erros à própria sessão daquela fase e
 manda tentar de novo (`implementer.max_attempts`, padrão 2). Só depois disso ele para e devolve

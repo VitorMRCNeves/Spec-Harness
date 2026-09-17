@@ -1,17 +1,21 @@
 # Spec-Harness
 
-Plugin do Claude Code e do Codex com **duas skills que se encadeiam**:
+Plugin do Claude Code com **quatro skills que se encadeiam** — as duas primeiras também no Codex:
 
 | Skill | O que faz |
 |---|---|
 | **`sdd`** | Quebra uma entrega em **specs construíveis** — cada uma é a menor mudança que dá para implementar e provar com teste, com contrato explícito e casos de aceite verificáveis |
 | **`spec-harness`** | **Executa** cada spec com enforcement mecânico: um git worktree isolado, **RED → GREEN → VERIFY** em sessões headless, e `ready_for_review` só depois dos gates |
+| **`spec-orchestrator`** | Executa as mesmas specs **sem o motor**: um subagente lean por spec, RED→GREEN na mesma sessão, worktree por spec e ondas em paralelo. Troca o enforcement mecânico por custo de token baixo |
+| **`qa-tester`** | Abre a **tela real** (Playwright, ou `claude-in-chrome` na sessão logada do usuário), roda os cenários, tira print de cada estado e escreve o relatório de QA manual com os bugs encontrados |
 
 O ponto não é gerar código: é que quem orquestra **não precisa ler o diff** para saber que a
 mudança está dentro do escopo declarado, que o teste existiu antes do código e que o lint passou.
 
 ```
 entrega vaga ──sdd──> .specs/sdd-<feature>/specs/NN-*.md ──spec-harness──> branch com commits por fase
+                                                     └─spec-orchestrator─> branch mergeada por onda (lean)
+                                                                      └──qa-tester──> .specs/…/qa/NN-relatorio.md
 ```
 
 ---
@@ -50,7 +54,7 @@ implementáveis.
 ## Codex
 
 A integração e suas diferenças de enforcement estão em [plugins/spec-harness/CODEX.md](plugins/spec-harness/CODEX.md).
-O motor aceita `init-repo --agent codex`; as skills são `$sdd` e `$spec-harness`.
+O motor aceita `init-repo --agent codex`; as skills são `$sdd` e `$spec-harness` — `spec-orchestrator` e `qa-tester` dependem de subagentes e de ferramentas do Claude Code, e não têm equivalente lá.
 O Codex executa RED/GREEN e revisão via `codex exec`, com auditoria de paths ao final da fase.
 As seções abaixo que citam `/plugin`, `claude`, sonnet e `PreToolUse` descrevem o provedor Claude.
 
@@ -61,8 +65,10 @@ As seções abaixo que citam `/plugin`, `claude`, sonnet e `PreToolUse` descreve
 /plugin install spec-harness
 ```
 
-Isso traz três coisas: a skill `spec-harness`, o motor (`engine/harness.ts`) e o hook
-`PreToolUse` que aplica o path scoping. Nada disso precisa ser configurado por repositório.
+Isso traz as quatro skills (`sdd`, `spec-harness`, `spec-orchestrator`, `qa-tester`), o motor
+(`engine/harness.ts`) e o hook `PreToolUse` que aplica o path scoping. Nada disso precisa ser
+configurado por repositório — e só o `spec-harness` usa motor e hook; as outras três são só
+instrução.
 
 ### Modo dev (sem passar pelo marketplace)
 
@@ -70,6 +76,8 @@ Isso traz três coisas: a skill `spec-harness`, o motor (`engine/harness.ts`) e 
 git clone https://github.com/VitorMRCNeves/Spec-Harness ~/repositorios/Spec-Harness
 ln -s ~/repositorios/Spec-Harness/plugins/spec-harness/engine ~/.claude/spec_harness
 ln -s ~/repositorios/Spec-Harness/plugins/spec-harness/skills/spec-harness ~/.claude/skills/spec-harness
+ln -s ~/repositorios/Spec-Harness/plugins/spec-harness/skills/spec-orchestrator ~/.claude/skills/spec-orchestrator
+ln -s ~/repositorios/Spec-Harness/plugins/spec-harness/skills/qa-tester ~/.claude/skills/qa-tester
 ```
 
 Nesse modo o hook do plugin não existe, então cada repositório precisa registrá-lo — é o que
@@ -154,6 +162,8 @@ plugins/spec-harness/
   .claude-plugin/plugin.json
   hooks/hooks.json                      ← PreToolUse → engine/hook-guard.sh
   skills/spec-harness/                  ← SKILL.md + references/ (task-packets, verify)
+  skills/spec-orchestrator/             ← SKILL.md (sem motor, sem config de repo)
+  skills/qa-tester/                     ← SKILL.md + templates/relatorio_qa.md
   engine/
     harness.ts                          ← o motor inteiro, sem nada de stack hardcoded
     hook-guard.sh                       ← guarda barata do hook (ver ressalvas)
@@ -219,6 +229,53 @@ RED; falha da medição aponta para infraestrutura. O agente não recebe "reduza
 Roda uma vez por spec (marcador `.post-verify.json`): um agente de code review — que recebe a
 spec, o diff e o top-N de CRAP — e, se o plugin `cognitive-loop` estiver disponível, o
 explicador da mudança. Gate `warn` por padrão.
+
+---
+
+## `spec-orchestrator` — as mesmas specs, sem o motor
+
+O `autorun` do `spec-harness` paga por spec: packet YAML, `PROJECT_MAP.md` por fase,
+`evidence.json`, retries, revisão automática. Isso é o que compra o enforcement — e nem toda
+entrega precisa dele. O `spec-orchestrator` mantém só as duas coisas que sustentam o resultado
+(teste antes do código, e uma spec não enxergar o worktree da outra) e descarta o resto.
+
+| | `spec-harness` | `spec-orchestrator` |
+|---|---|---|
+| Sessões por spec | 2 (RED, GREEN) + motor | 1 |
+| Packet, evidência, gates | sim | não |
+| Hook de path scoping | sim, em tempo real | não — `## Arquivos permitidos` vira instrução, não bloqueio |
+| Revisão automática | sim | não |
+| Verificação do orquestrador | gates do motor | reroda o comando de teste no worktree (custa `Bash`, não token) |
+
+Isolamento é **entre** specs, não dentro de uma: teste e código da mesma spec saem da mesma
+sessão, porque duas sessões pagariam o contexto frio duas vezes pelo mesmo trabalho — que é
+exatamente o custo que esta skill existe para evitar. As ondas saem da coluna **Depende de** do
+`implementacao.md`; specs sem dependência mútua rodam em paralelo e são mergeadas uma a uma.
+
+Use quando o custo do `autorun` não compensa. Use o `spec-harness` quando o enforcement mecânico
+é o ponto — hook que bloqueia escrita fora do escopo, evidência auditável, gate de CRAP. Não rode
+os dois na mesma spec.
+
+---
+
+## `qa-tester` — o que o teste verde não prova
+
+Suíte verde diz que o contrato foi cumprido; não diz que alguém consegue clicar. O `qa-tester`
+abre a tela de verdade, executa os cenários da spec (ou da descrição livre), tira print de cada
+estado relevante e entrega `.specs/sdd-<feature>/qa/NN-relatorio.md`: checklist que um colega sem
+contexto de código repete à mão, mais os bugs com esperado × obtido, print e erros de console.
+
+O acesso à tela tem três vias, em ordem de fidelidade:
+
+1. **Sessão real do usuário** (`claude-in-chrome`) — ele deixa o app logado no Chrome dele. Zero
+   setup, zero credencial na mão do agente, CSS e dados reais.
+2. **Playwright** com credencial de teste reutilizável.
+3. **Harness de componente do repo** (Vitest browser mode, Storybook) — último recurso, com a
+   perda de fidelidade visual registrada no próprio relatório.
+
+Regra que sustenta o relatório: cenário só é ✅ se o resultado esperado foi **confirmado** na
+tela — "carregou sem erro" não confirma nada —, e resultado esperado nunca é inventado: sem ele
+na spec, a skill pergunta antes de rodar.
 
 ---
 

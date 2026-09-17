@@ -1,7 +1,7 @@
 {
   "name": "spec-harness",
-  "description": "Duas skills que se encadeiam: `sdd` quebra uma entrega em specs construíveis e `spec-harness` implementa cada spec em RED -> GREEN -> VERIFY dentro de um git worktree com enforcement de path.",
-  "version": "1.1.0",
+  "description": "Quatro skills que se encadeiam: `sdd` quebra uma entrega em specs construíveis, `spec-harness` implementa cada spec em RED -> GREEN -> VERIFY dentro de um git worktree com enforcement de path, `spec-orchestrator` faz o mesmo sem o motor quando o custo de token importa mais que o enforcement, e `qa-tester` confirma na tela real o que os testes não provam.",
+  "version": "1.2.0",
   "author": {
     "name": "VitorMRCNeves",
     "url": "https://github.com/VitorMRCNeves"

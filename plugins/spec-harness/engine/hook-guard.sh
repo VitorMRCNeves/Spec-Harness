@@ -10,7 +10,15 @@ set -euo pipefail
 shopt -s nullglob
 
 harness_home="${SPEC_HARNESS_HOME:-/tmp/spec_harness}"
+host="${SPEC_HARNESS_HOOK_HOST:-claude}"
 ativos=("$harness_home"/active/*.json)
-(( ${#ativos[@]} )) || exit 0
+if (( ${#ativos[@]} == 0 )); then
+  if [[ "$host" == "cursor" ]]; then
+    printf '%s\n' '{"permission":"allow"}'
+  elif [[ "$host" == "antigravity" ]]; then
+    printf '%s\n' '{"decision":"allow"}'
+  fi
+  exit 0
+fi
 
 exec node "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/harness.ts" hook-check

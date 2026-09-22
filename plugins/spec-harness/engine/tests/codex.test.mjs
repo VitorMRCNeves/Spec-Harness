@@ -108,7 +108,13 @@ test('init-repo preserves existing configuration; doctor reports the Codex enfor
   const f = fixture(t);
   const result = f.run('init-repo', '--agent', 'codex');
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.repo, '.claude/spec_harness/harness.config.json'))), f.config);
+  const cfg = JSON.parse(fs.readFileSync(path.join(f.repo, '.claude/spec_harness/harness.config.json')));
+  assert.equal(cfg.agent, 'codex');
+  assert.deepEqual(cfg.scopes, f.config.scopes);
+  assert.deepEqual(cfg.implementer.prompts, f.config.implementer.prompts);
+  assert.equal(cfg.implementer.reuse_session, false);
+  assert.equal(cfg.post_verify.enabled, true);
+  assert.equal(cfg.post_verify.jobs[0].id, 'code_review');
   assert.equal(fs.existsSync(path.join(f.repo, '.claude/settings.json')), false);
   assert.match(result.stdout, /não há bloqueio preventivo/);
 });

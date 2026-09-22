@@ -10,6 +10,8 @@ allowed-tools: [Read, Glob, Grep, Bash, Agent, AskUserQuestion, Write, Skill, We
 
 Se o agente atual for Codex, leia `../../CODEX.md` antes das etapas abaixo. Esse guia adapta os comandos, ferramentas e garantias específicas do Claude descritas neste documento. No Codex, o motor usa `codex exec`; as instruções de hooks Claude não se aplicam.
 
+Se o agente atual for Cursor, leia `../../CURSOR.md`. Se for a Antigravity CLI, leia `../../ANTIGRAVITY.md`. Cada nota diz o que o host garante e quais ferramentas nativas substituem `Read`, `Bash` e `AskUserQuestion`.
+
 
 
 Você está quebrando uma entrega em **specs construíveis**: cada uma é a menor mudança que dá

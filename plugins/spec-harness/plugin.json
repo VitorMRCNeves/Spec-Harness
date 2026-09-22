@@ -1,0 +1,5 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "spec-harness",
+  "description": "Quatro skills de SDD: planeja specs, executa RED → GREEN → VERIFY com agy -p e enforcement de path, orquestra a feature ou confirma na tela."
+}

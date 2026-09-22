@@ -12,8 +12,19 @@ export interface AgyJob {
   skip_permissions?: boolean;
 }
 
+const DEFAULT_TIMEOUT_MS = 2_400_000;
+
+// `agy -p` não trabalha no cwd: sem --add-dir ele escreve em ~/.gemini/antigravity-cli/scratch,
+// devolve SUCCESS e o worktree fica intocado. E o modo print desiste sozinho em 5 min
+// (--print-timeout), bem antes do timeout da fase.
 export function agyArgs(job: AgyJob): string[] {
-  const args = ["-p", job.prompt, "--output-format", "json"];
+  const timeoutSeconds = Math.ceil((job.timeout_ms ?? DEFAULT_TIMEOUT_MS) / 1000);
+  const args = [
+    "-p", job.prompt,
+    "--output-format", "json",
+    "--add-dir", job.cwd,
+    "--print-timeout", `${timeoutSeconds}s`,
+  ];
   if (job.conversationId) args.push("--conversation", job.conversationId);
   if (job.model) args.push("--model", job.model);
   if (job.skip_permissions) args.push("--dangerously-skip-permissions");
@@ -56,7 +67,7 @@ export function runAntigravity(job: AgyJob): Promise<{ code: number; conversatio
     const child = spawn("agy", agyArgs(job), {
       cwd: job.cwd,
       env: process.env,
-      timeout: job.timeout_ms ?? 2_400_000,
+      timeout: (job.timeout_ms ?? DEFAULT_TIMEOUT_MS) + 30_000, // folga para o agy encerrar sozinho
       stdio: ["ignore", "pipe", "pipe"],
     });
     child.stdout.on("data", (data) => {

@@ -1092,7 +1092,7 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
     if (postVerifyConfig().enabled) {
       const { results, errors: reviewErrors } = await runPostVerify(packet, run);
       extra.post_verify = {
-        model: postVerifyConfig().model ?? (agentProvider() === "codex" ? "Codex default" : "sonnet"),
+        model: postVerifyConfig().model ?? defaultModelLabel(),
         gate: postVerifyConfig().gate ?? "warn",
         review_dir: path.relative(REPO_ROOT, reviewDir),
         results,
@@ -1655,7 +1655,7 @@ async function runPostVerify(
   };
 
   console.log(
-    `\nRevisão automática pós-VERIFY (${cfg.model ?? (agentProvider() === "codex" ? "Codex default" : "sonnet")}, ${jobs.length} agentes em paralelo): ` +
+    `\nRevisão automática pós-VERIFY (${cfg.model ?? defaultModelLabel()}, ${jobs.length} agentes em paralelo): ` +
       `${jobs.map((j) => j.id).join(", ")}`
   );
   console.log(`  diff revisado: git diff ${base}...${run.branch}`);
@@ -2423,13 +2423,14 @@ interface HostProfile {
   cli: string | null; // binário spawnado no autorun e no post_verify; null = sem modo headless
   reuseSession: boolean; // retoma a sessão da fase anterior (implementer.prompts.retomada)
   selfContainedJobs: boolean; // post_verify sem plugin_dirs/add_dirs do Claude; exit != 0 reprova a fase
+  hookFile: string | null; // hook de projeto: o worktree nasce da branch e só o tem se for copiado
 }
 
 const HOSTS: Record<AgentName, HostProfile> = {
-  claude: { cli: "claude", reuseSession: true, selfContainedJobs: false },
-  codex: { cli: "codex", reuseSession: false, selfContainedJobs: true },
-  cursor: { cli: null, reuseSession: false, selfContainedJobs: false },
-  antigravity: { cli: "agy", reuseSession: true, selfContainedJobs: true },
+  claude: { cli: "claude", reuseSession: true, selfContainedJobs: false, hookFile: ".claude/settings.json" },
+  codex: { cli: "codex", reuseSession: false, selfContainedJobs: true, hookFile: null },
+  cursor: { cli: null, reuseSession: false, selfContainedJobs: false, hookFile: ".cursor/hooks.json" },
+  antigravity: { cli: "agy", reuseSession: true, selfContainedJobs: true, hookFile: ".agents/hooks.json" },
 };
 
 function isAgentName(value: string): value is AgentName {
@@ -2444,6 +2445,10 @@ function agentProvider(): AgentName {
 
 function host(): HostProfile {
   return HOSTS[agentProvider()];
+}
+
+function defaultModelLabel(): string {
+  return agentProvider() === "claude" ? "sonnet" : `${agentProvider()} default`;
 }
 
 interface ImplementerConfig {
@@ -2627,7 +2632,7 @@ async function runImplementer(
   }
 
   if (agentProvider() === "antigravity") {
-    console.log("  Antigravity: agy -p no worktree; o hook do plugin segura o path.");
+    console.log("  Antigravity: agy -p no worktree; o hook (.agents/hooks.json copiado ou o do plugin) segura o path.");
     const result = await runAntigravity({
       cwd: run.worktree,
       prompt,
@@ -3204,6 +3209,12 @@ function applyAgentProfile(perfil: PerfilJson, selectedAgent: string, fresh: boo
     wt.copy_paths = (wt.copy_paths ?? []).filter((entry) => entry !== ".claude/settings.json");
     changes.push("worktree.copy_paths sem .claude/settings.json");
   }
+  // Sem o hook de projeto dentro do worktree, a fase roda lá sem enforcement nenhum.
+  const hookFile = HOSTS[selectedAgent as AgentName].hookFile;
+  if (hookFile && !(wt.copy_paths ?? []).includes(hookFile)) {
+    wt.copy_paths = [...(wt.copy_paths ?? []), hookFile];
+    changes.push(`worktree.copy_paths + ${hookFile}`);
+  }
 
   const pv = (perfil.post_verify ?? {}) as Record<string, unknown>;
   if (selectedAgent === "cursor") {
@@ -3510,6 +3521,14 @@ function diagnostico(): Problema[] {
     } else {
       add("ERRO", "worktree.copy_paths", "sem '.claude/settings.json' — o hook não roda dentro do worktree e a spec fica sem enforcement de path.");
     }
+  }
+  const hookFile = HOSTS[agentProvider()].hookFile;
+  if (agentProvider() !== "claude" && hookFile && !copyPaths.includes(hookFile) && !gitRastreia(hookFile)) {
+    add(
+      "ERRO",
+      "worktree.copy_paths",
+      `sem '${hookFile}' — o hook não existe dentro do worktree e a fase roda lá sem enforcement de path.`
+    );
   }
   for (const rel of copyPaths) {
     if (!repoTem(rel)) add("AVISO", "worktree.copy_paths", `'${rel}' não existe no repo (será ignorado na cópia).`);

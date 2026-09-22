@@ -179,6 +179,7 @@ test('init-repo --agent cursor grava o hook e as quatro skills', t => {
   assert.equal(cfg.agent, 'cursor');
   assert.equal(cfg.implementer.reuse_session, false);
   assert.equal(cfg.post_verify.enabled, false);
+  assert.ok(cfg.worktree.copy_paths.includes('.cursor/hooks.json'));
 });
 
 test('init-repo --agent antigravity grava o hook do workspace', t => {
@@ -195,6 +196,7 @@ test('init-repo --agent antigravity grava o hook do workspace', t => {
   assert.match(command, /hook-guard\.sh/);
   const cfg = JSON.parse(fs.readFileSync(path.join(f.repo, '.claude/spec_harness/harness.config.json'), 'utf8'));
   assert.equal(cfg.agent, 'antigravity');
+  assert.ok(cfg.worktree.copy_paths.includes('.agents/hooks.json'), 'o hook precisa ir para o worktree');
   assert.equal(cfg.implementer.model, undefined);
   assert.equal(cfg.post_verify.jobs[0].plugin_dirs, undefined);
 });
@@ -220,7 +222,7 @@ test('init-repo --agent sem --force aplica o perfil do agent e preserva o resto'
   assert.equal(cursorCfg.implementer.reuse_session, false);
   assert.equal(cursorCfg.implementer.prompts.red, 'KEEP');
   assert.equal(cursorCfg.post_verify.enabled, false);
-  assert.deepEqual(cursorCfg.worktree.copy_paths, ['.env']);
+  assert.deepEqual(cursorCfg.worktree.copy_paths, ['.env', '.cursor/hooks.json']);
   assert.deepEqual(cursorCfg.scopes, { app: { paths: ['app/'] } });
 
   const agy = spawnSync(process.execPath, [harness, 'init-repo', '--agent', 'antigravity'], {

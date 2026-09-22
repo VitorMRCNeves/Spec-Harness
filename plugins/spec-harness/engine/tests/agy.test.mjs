@@ -92,6 +92,8 @@ test('agy -p leva o prompt em argv e só pula permissão quando a config pede', 
   assert.deepEqual(base.slice(0, 4), ['-p', 'PHASE red', '--output-format', 'json']);
   assert.equal(base.includes('--dangerously-skip-permissions'), false);
   assert.equal(base.includes('--conversation'), false);
+  assert.equal(base[base.indexOf('--add-dir') + 1], '/wt');
+  assert.equal(base[base.indexOf('--print-timeout') + 1], '2400s');
   const resumed = agyArgs({
     prompt: 'PHASE green', logPath: '/tmp/x', cwd: '/wt', conversationId: 'conv-1', skip_permissions: true,
   });
@@ -124,6 +126,7 @@ test('RED e GREEN retomam a conversa; a revisão não pede skip de permissão', 
   assert.equal(calls[1].args[calls[1].args.indexOf('--conversation') + 1], 'conv-1');
   assert.equal(calls.every((call) => !call.args.includes('--dangerously-skip-permissions')), true);
   assert.notEqual(calls[0].cwd, f.repo);
+  assert.equal(calls[0].args[calls[0].args.indexOf('--add-dir') + 1], calls[0].cwd);
   assert.equal(fs.readFileSync(path.join(f.repo, 'app/value.mjs'), 'utf8'), 'export const value = 1;\n');
 });
 

@@ -20,9 +20,9 @@ node /caminho/do/plugin/engine/harness.ts doctor
 node /caminho/do/plugin/engine/harness.ts autorun .specs/sdd-feature/packets/SDD-01.yaml --no-merge
 ```
 
-`init-repo --agent antigravity` grava `.agents/hooks.json` com a chave `spec-harness-path-scope`. O pacote do plugin (`plugin.json`, `skills/`, `hooks.json` na raiz) instala com `agy plugin install /caminho/plugins/spec-harness`. Os dois gates decidem a mesma coisa; o do workspace usa caminho absoluto e continua valendo mesmo se a versão do `agy` só registrar o hook do plugin por outro caminho.
+`init-repo --agent antigravity` grava `.agents/hooks.json` com a chave `spec-harness-path-scope`. O pacote do plugin (`plugin.json`, `skills/`, `hooks.json` na raiz) instala com `agy plugin install /caminho/plugins/spec-harness`. Os dois gates decidem a mesma coisa; o do workspace usa caminho absoluto e continua valendo mesmo se a versão do `agy` só registrar o hook do plugin por outro caminho. O worktree nasce da branch: o `init-repo` põe `.agents/hooks.json` em `worktree.copy_paths`, senão a fase roda lá dentro sem hook (o doctor acusa).
 
-RED e GREEN rodam com `agy -p` no worktree, `--output-format json`. A retomada usa `--conversation` com o id gravado na run. Stdout vazio, mesmo com exit 0, é falha da fase — não aprovação. Status diferente de `SUCCESS` também reprova. `--dangerously-skip-permissions` só entra se `implementer.skip_permissions` for `true`. Sem isso o shell headless pode ser negado; o doctor avisa.
+RED e GREEN rodam com `agy -p` no worktree, `--output-format json`, `--add-dir <worktree>` e `--print-timeout` igual ao `timeout_ms` da fase. Sem `--add-dir` o `agy -p` escreve em `~/.gemini/antigravity-cli/scratch` e devolve `SUCCESS` com o worktree intocado; sem `--print-timeout` o modo print desiste em 5 min. A retomada usa `--conversation` com o id gravado na run. Stdout vazio, mesmo com exit 0, é falha da fase — não aprovação. Status diferente de `SUCCESS` também reprova. `--dangerously-skip-permissions` só entra se `implementer.skip_permissions` for `true`. Sem isso o shell headless pode ser negado; o doctor avisa.
 
 ## Garantias e limites
 

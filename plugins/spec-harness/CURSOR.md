@@ -22,13 +22,13 @@ node /caminho/do/plugin/engine/harness.ts scaffold-packet .specs/sdd-feature/spe
 node /caminho/do/plugin/engine/harness.ts verify-packet .specs/sdd-feature/packets/.expanded/SDD-01-red.yaml
 ```
 
-`init-repo --agent cursor` grava `.cursor/hooks.json` (`beforeReadFile`, `beforeShellExecution`, `preToolUse`, `afterFileEdit`, `failClosed: true`) e liga as quatro skills em `.cursor/skills/` por symlink. Não apaga hooks de outros eventos. Não há `autorun` headless: não existe um equivalente estável de `claude -p` para spawnar daqui. A fase é implementada nesta sessão, dentro do worktree da run, e o motor só verifica.
+`init-repo --agent cursor` grava `.cursor/hooks.json` (`beforeReadFile`, `beforeShellExecution`, `preToolUse`, `failClosed: true`) e liga as quatro skills em `.cursor/skills/` por symlink. Não apaga hooks de outros eventos. O comando do hook tem o caminho absoluto do plugin nesta máquina: não commite `.cursor/hooks.json`; cada pessoa roda o `init-repo`. Não há `autorun` headless: não existe um equivalente estável de `claude -p` para spawnar daqui. A fase é implementada nesta sessão, dentro do worktree da run, e o motor só verifica.
 
 ## Garantias e limites
 
-O hook de projeto bloqueia leitura e escrita fora dos globs do packet, e shell fora da allowlist, enquanto existe run ativa. Sem run ativa a guarda responde `{"permission":"allow"}` e sai 0. O campo `path_enforcement` é `pre-tool-hook-and-audit`.
+O hook de projeto bloqueia leitura e escrita fora dos globs do packet, e shell fora da allowlist, enquanto existe run ativa. O Cursor não tem evento antes da escrita: ela só é barrada no `preToolUse` (`afterFileEdit` roda depois e não bloqueia). No `preToolUse`, ferramenta sem regra no packet (subagente, MCP) é negada enquanto a run estiver ativa. Shell é checado por segmento: cada parte de `a && b`, `a; b` ou `a | b` precisa estar na allowlist, e substituição de comando ou redirecionamento para arquivo é negado. Sem run ativa a guarda responde `{"permission":"allow"}` e sai 0. O campo `path_enforcement` é `pre-tool-hook-and-audit`.
 
-A sessão precisa trabalhar com cwd ou path absoluto dentro do worktree da run. Fora dele o hook não acha a execução e libera. Não afirme paridade com o Codex: lá a auditoria é pós-fase e não há hook preventivo. Não afirme `autorun` headless neste host.
+A sessão precisa trabalhar com cwd, `working_directory` ou path dentro do worktree da run. Fora dele o hook não acha a execução e libera. Não afirme paridade com o Codex: lá a auditoria é pós-fase e não há hook preventivo. Não afirme `autorun` headless neste host.
 
 Prefira implementar no worktree aberto, rode `verify-packet` e examine a evidência antes de `merge-spec`. Em um repo vazio, prepare o perfil somente após definir stack, comandos de teste e fronteiras.
 

@@ -10,7 +10,8 @@ set -euo pipefail
 shopt -s nullglob
 
 harness_home="${SPEC_HARNESS_HOME:-/tmp/spec_harness}"
-host="${SPEC_HARNESS_HOOK_HOST:-claude}"
+export SPEC_HARNESS_HOOK_HOST="${SPEC_HARNESS_HOOK_HOST:-claude}"
+host="$SPEC_HARNESS_HOOK_HOST"
 ativos=("$harness_home"/active/*.json)
 if (( ${#ativos[@]} == 0 )); then
   if [[ "$host" == "cursor" ]]; then

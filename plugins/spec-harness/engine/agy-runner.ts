@@ -30,27 +30,27 @@ export function interpretAgyOutput(
   try {
     parsed = JSON.parse(text) as Record<string, unknown>;
   } catch {
-    return { code: exitCode ?? 1 };
+    return { code: exitCode || 1 }; // stdout que não é o JSON final não aprova, nem com exit 0
   }
   const conversationId = typeof parsed.conversation_id === "string" ? parsed.conversation_id : undefined;
   const status = typeof parsed.status === "string" ? parsed.status : undefined;
-  if (status === "SUCCESS") return { code: 0, conversationId };
-  if (status) {
-    return { code: exitCode && exitCode !== 0 ? exitCode : 1, conversationId };
-  }
-  return { code: exitCode ?? 1, conversationId };
+  // Aprovação exige as duas coisas: status SUCCESS e um processo que não saiu com erro.
+  // exit null (morto por timeout/sinal) com SUCCESS no stdout ainda conta: o JSON final já saiu.
+  if (exitCode !== null && exitCode !== 0) return { code: exitCode, conversationId };
+  return { code: status === "SUCCESS" ? 0 : 1, conversationId };
 }
 
 export function runAntigravity(job: AgyJob): Promise<{ code: number; conversationId?: string }> {
   return new Promise((resolve) => {
-    const chunks: string[] = [];
+    // O log é gravado enquanto a fase roda: num timeout de 40 min ele é o único rastro do que houve.
+    fs.mkdirSync(path.dirname(job.logPath), { recursive: true });
+    fs.writeFileSync(job.logPath, "", "utf-8");
+    const log = (text: string) => fs.appendFileSync(job.logPath, text, "utf-8");
     let stdout = "";
     let settled = false;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
-      fs.mkdirSync(path.dirname(job.logPath), { recursive: true });
-      fs.writeFileSync(job.logPath, chunks.join(""), "utf-8");
       resolve(interpretAgyOutput(code, stdout));
     };
     const child = spawn("agy", agyArgs(job), {
@@ -62,11 +62,11 @@ export function runAntigravity(job: AgyJob): Promise<{ code: number; conversatio
     child.stdout.on("data", (data) => {
       const text = String(data);
       stdout += text;
-      chunks.push(text);
+      log(text);
     });
-    child.stderr.on("data", (data) => chunks.push(String(data)));
+    child.stderr.on("data", (data) => log(String(data)));
     child.on("error", (error) => {
-      chunks.push(`\n[spawn error] ${String(error)}`);
+      log(`\n[spawn error] ${String(error)}`);
       finish(1);
     });
     child.on("close", (code) => finish(code));

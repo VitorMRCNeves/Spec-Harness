@@ -103,7 +103,8 @@ test('agy -p leva o prompt em argv e só pula permissão quando a config pede', 
   const success = interpretAgyOutput(null, '{"conversation_id":"conv-1","status":"SUCCESS"}');
   assert.equal(success.code, 0);
   assert.equal(success.conversationId, 'conv-1');
-  assert.equal(interpretAgyOutput(17, '{"status":"SUCCESS"}').code, 0);
+  assert.equal(interpretAgyOutput(17, '{"status":"SUCCESS"}').code, 17);
+  assert.equal(interpretAgyOutput(0, 'texto solto').code, 1);
 });
 
 test('RED e GREEN retomam a conversa; a revisão não pede skip de permissão', t => {

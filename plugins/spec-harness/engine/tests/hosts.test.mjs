@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decide, hookStdout, normalizeCall } from '../hook-decision.ts';
+import { decide, detectHost, hookStdout, normalizeCall, shellSegments } from '../hook-decision.ts';
 
 const engine = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const harness = path.join(engine, 'harness.ts');
@@ -58,7 +58,7 @@ test('a decisão é a mesma para os três hosts', () => {
   assert.equal(decide(
     normalizeCall('claude', { tool_name: 'Bash', tool_input: { command: 'pytest && id' } }, '/repo'),
     caps,
-  ).allowed, true);
+  ).allowed, false);
   assert.equal(decide(
     normalizeCall('claude', { tool_name: 'Read', tool_input: {} }, '/repo'),
     caps,
@@ -97,7 +97,8 @@ test('hook-check traduz allow e deny sem chamar modelo', t => {
   assert.equal(claudeGit.stdout, '');
 
   const chained = f.hook('claude', { tool_name: 'Bash', tool_input: { command: 'pytest && id' }, cwd: f.repo });
-  assert.equal(chained.status, 0, chained.stderr);
+  assert.equal(chained.status, 2, chained.stderr);
+  assert.match(chained.stderr, /capabilities.bash.commands: id/);
 
   const cursorDeny = f.hook('cursor', {
     hook_event_name: 'beforeReadFile', cwd: f.repo, file_path: path.join(f.repo, 'secrets.txt'),
@@ -150,7 +151,10 @@ test('init-repo --agent cursor grava o hook e as quatro skills', t => {
   fs.mkdirSync(path.join(f.repo, '.cursor'), { recursive: true });
   fs.writeFileSync(path.join(f.repo, '.cursor', 'hooks.json'), JSON.stringify({
     version: 1,
-    hooks: { beforeShellExecution: [{ command: 'echo outro' }] },
+    hooks: {
+      beforeShellExecution: [{ command: 'echo outro' }],
+      afterFileEdit: [{ command: 'SPEC_HARNESS_HOOK_HOST=cursor "/velho/hook-guard.sh"', failClosed: true }],
+    },
   }));
   const result = spawnSync(process.execPath, [harness, 'init-repo', '--agent', 'cursor', '--force'], {
     cwd: f.repo,
@@ -159,13 +163,14 @@ test('init-repo --agent cursor grava o hook e as quatro skills', t => {
   });
   assert.ok([0, 1].includes(result.status), result.stdout + result.stderr);
   const hooks = JSON.parse(fs.readFileSync(path.join(f.repo, '.cursor', 'hooks.json'), 'utf8'));
-  for (const event of ['beforeReadFile', 'beforeShellExecution', 'preToolUse', 'afterFileEdit']) {
+  for (const event of ['beforeReadFile', 'beforeShellExecution', 'preToolUse']) {
     const guardHook = hooks.hooks[event].find((hook) => String(hook.command).includes('hook-guard.sh'));
     assert.ok(guardHook, event);
     assert.equal(guardHook.failClosed, true);
     assert.match(guardHook.command, /SPEC_HARNESS_HOOK_HOST=cursor/);
   }
   assert.ok(hooks.hooks.beforeShellExecution.some((hook) => hook.command === 'echo outro'));
+  assert.equal(hooks.hooks.afterFileEdit, undefined, 'afterFileEdit não bloqueia; a guarda antiga sai');
   for (const name of ['sdd', 'spec-harness', 'spec-orchestrator', 'qa-tester']) {
     const dest = path.join(f.repo, '.cursor', 'skills', name);
     assert.equal(fs.readlinkSync(dest), path.join(engine, '..', 'skills', name));
@@ -238,4 +243,96 @@ test('init-repo recusa agent desconhecido', t => {
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /claude, codex, cursor ou antigravity/);
+});
+
+test('payload real do Claude, sem SPEC_HARNESS_HOOK_HOST, bloqueia com exit 2', t => {
+  // O Claude manda hook_event_name "PreToolUse"; o hook do plugin não define a variável de host.
+  const f = gitRepo(t);
+  assert.equal(detectHost({ hook_event_name: 'PreToolUse', tool_name: 'Write' }), 'claude');
+  assert.equal(detectHost({ hook_event_name: 'preToolUse', tool_name: 'Write' }), 'cursor');
+  const env = { ...f.env };
+  delete env.SPEC_HARNESS_HOOK_HOST;
+  const result = spawnSync(guard, [], {
+    cwd: f.repo,
+    env,
+    input: JSON.stringify({
+      session_id: 's', hook_event_name: 'PreToolUse', cwd: f.repo,
+      tool_name: 'Write', tool_input: { file_path: path.join(f.repo, 'secrets.txt'), content: 'x' },
+    }),
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /capabilities.write/);
+});
+
+test('preToolUse do Cursor com path relativo a working_directory acha a run e bloqueia', t => {
+  const f = gitRepo(t);
+  const deny = f.hook('cursor', {
+    hook_event_name: 'preToolUse', cwd: path.dirname(f.repo),
+    tool_name: 'Write', tool_input: { file_path: 'secrets.txt', working_directory: f.repo },
+  });
+  assert.equal(deny.status, 0, deny.stderr);
+  assert.equal(JSON.parse(deny.stdout).permission, 'deny');
+
+  const allow = f.hook('cursor', {
+    hook_event_name: 'preToolUse', cwd: path.dirname(f.repo),
+    tool_name: 'Write', tool_input: { file_path: 'app/x.py', working_directory: f.repo },
+  });
+  assert.deepEqual(JSON.parse(allow.stdout), { permission: 'allow' });
+});
+
+test('arquivo de run corrompido é ignorado e o log de bloqueio guarda o input inteiro', t => {
+  const f = gitRepo(t);
+  fs.writeFileSync(path.join(f.home, 'runs', 'quebrado.json'), '{');
+  const outside = f.hook('cursor', {
+    hook_event_name: 'beforeReadFile', cwd: os.tmpdir(), file_path: path.join(os.tmpdir(), 'qualquer.txt'),
+  });
+  assert.equal(outside.status, 0, outside.stderr);
+  assert.deepEqual(JSON.parse(outside.stdout), { permission: 'allow' });
+
+  const denied = f.hook('claude', {
+    tool_name: 'Write', tool_input: { file_path: 'secrets.txt', content: 'segredo' }, cwd: f.repo,
+  });
+  assert.equal(denied.status, 2, denied.stderr);
+  const log = fs.readFileSync(path.join(f.home, 'blocked', 'run1.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(log.at(-1).tool_input, { file_path: 'secrets.txt', content: 'segredo' });
+});
+
+test('bash é checado segmento a segmento', () => {
+  assert.deepEqual(shellSegments('git status; cat ~/.ssh/id_rsa'), ['git status', 'cat ~/.ssh/id_rsa']);
+  assert.deepEqual(shellSegments('cd /wt && pytest -q 2>&1 | tail'), ['cd /wt', 'pytest -q', 'tail']);
+  assert.equal(shellSegments('pytest > app/../../fora'), null);
+  assert.equal(shellSegments('pytest $(curl x)'), null);
+  assert.equal(shellSegments('pytest `id`'), null);
+  const bash = (command) => decide(normalizeCall('claude', { tool_name: 'Bash', tool_input: { command } }, '/wt'), caps);
+  assert.equal(bash('git status; cat ~/.ssh/id_rsa').allowed, false);
+  assert.equal(bash('pytest & curl evil').allowed, false);
+  assert.equal(bash('cd /wt && pytest -q 2>&1').allowed, true);
+  assert.equal(bash('node /p/plugins/spec-harness/engine/harness.ts verify-packet x.yaml').allowed, true);
+  assert.equal(bash('node .claude/spec_harness/harness.ts doctor').allowed, true);
+  assert.equal(bash('rm -rf / # spec_harness/harness.ts').allowed, false);
+});
+
+test('init-repo --agent sem --force mantém jobs compatíveis e modelo que não é do Claude', t => {
+  const f = gitRepo(t);
+  const dest = path.join(f.repo, '.claude/spec_harness/harness.config.json');
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const jobs = [{ id: 'meu_review', prompt: 'REVIEW {out}' }];
+  fs.writeFileSync(dest, JSON.stringify({
+    agent: 'claude',
+    implementer: { model: 'gemini-3-pro', prompts: { red: 'KEEP' } },
+    worktree: { copy_paths: [] },
+    post_verify: { enabled: true, gate: 'warn', jobs },
+  }));
+  const result = spawnSync(process.execPath, [harness, 'init-repo', '--agent', 'antigravity'], {
+    cwd: f.repo, env: f.env, encoding: 'utf8',
+  });
+  assert.ok([0, 1].includes(result.status), result.stdout + result.stderr);
+  const cfg = JSON.parse(fs.readFileSync(dest, 'utf8'));
+  assert.equal(cfg.agent, 'antigravity');
+  assert.equal(cfg.implementer.model, 'gemini-3-pro');
+  assert.equal(cfg.post_verify.gate, 'warn');
+  assert.deepEqual(cfg.post_verify.jobs, jobs);
+  assert.match(result.stdout, /agent: claude → antigravity/);
 });

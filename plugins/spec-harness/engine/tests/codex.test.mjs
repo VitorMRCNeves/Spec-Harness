@@ -104,7 +104,7 @@ test('Codex failure does not approve or continue the phase', t => {
   assert.equal(fs.existsSync(path.join(f.repo, '.specs/sdd-smoke/packets/.expanded/SDD-01-red.evidence.json')), false);
 });
 
-test('init-repo preserves existing configuration; doctor reports the Codex enforcement limit', t => {
+test('init-repo keeps compatible configuration; doctor reports the Codex enforcement limit', t => {
   const f = fixture(t);
   const result = f.run('init-repo', '--agent', 'codex');
   assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -114,7 +114,7 @@ test('init-repo preserves existing configuration; doctor reports the Codex enfor
   assert.deepEqual(cfg.implementer.prompts, f.config.implementer.prompts);
   assert.equal(cfg.implementer.reuse_session, false);
   assert.equal(cfg.post_verify.enabled, true);
-  assert.equal(cfg.post_verify.jobs[0].id, 'code_review');
+  assert.deepEqual(cfg.post_verify.jobs, f.config.post_verify.jobs);
   assert.equal(fs.existsSync(path.join(f.repo, '.claude/settings.json')), false);
   assert.match(result.stdout, /não há bloqueio preventivo/);
 });

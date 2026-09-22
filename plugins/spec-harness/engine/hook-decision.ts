@@ -1,6 +1,8 @@
 // Decisão única de path scoping. Cada host só normaliza o payload e traduz a resposta.
 // A regra em si é a do hook Claude: leitura nos globs de read+write, escrita só nos de write,
-// Bash por prefixo. Não afrouxe isto ao adicionar um host.
+// Bash por prefixo, segmento a segmento. Não afrouxe isto ao adicionar um host.
+
+import path from "node:path";
 
 export type HookHost = "claude" | "cursor" | "antigravity";
 
@@ -16,6 +18,7 @@ export interface NormalizedCall {
   kind: "read" | "write" | "bash" | "other";
   path: string | null;
   command: string | null;
+  input: Record<string, unknown>;
 }
 
 export interface Decision {
@@ -45,6 +48,13 @@ const WRITE_TOOLS = new Set([
 ]);
 
 const BASH_TOOLS = new Set(["bash", "shell", "run_command"]);
+
+// Eventos que só o Cursor emite. O Claude também manda hook_event_name, mas em PascalCase
+// ("PreToolUse"): confundir os dois faz o Claude receber JSON do Cursor com exit 0 e liberar tudo.
+const CURSOR_EVENTS = new Set(["beforeReadFile", "beforeShellExecution", "beforeMCPExecution", "preToolUse"]);
+
+// O motor chamado pelo caminho da instalação manual (.claude/spec_harness) ou do plugin (engine/).
+const ENGINE_COMMAND = /^node\s+\S*(spec_harness|engine)\/harness\.ts(\s|$)/;
 
 export function globToRegex(pattern: string): RegExp {
   let re = "";
@@ -84,7 +94,7 @@ export function matchesAny(relPath: string, patterns: string[]): boolean {
 export function detectHost(raw: Record<string, unknown>, envHost?: string): HookHost {
   if (envHost === "cursor" || envHost === "antigravity" || envHost === "claude") return envHost;
   if (raw.toolCall && typeof raw.toolCall === "object") return "antigravity";
-  if (typeof raw.hook_event_name === "string") return "cursor";
+  if (typeof raw.hook_event_name === "string" && CURSOR_EVENTS.has(raw.hook_event_name)) return "cursor";
   return "claude";
 }
 
@@ -112,6 +122,12 @@ function firstString(record: Record<string, unknown>, keys: string[]): string | 
   return null;
 }
 
+// Paths relativos (o preToolUse do Cursor manda relativo a working_directory) viram absolutos,
+// senão o hook não acha a run do worktree e libera.
+function absolute(value: string | null, base: string): string | null {
+  return value && !path.isAbsolute(value) ? path.resolve(base, value) : value;
+}
+
 export function normalizeCall(host: HookHost, raw: Record<string, unknown>, fallbackCwd: string): NormalizedCall {
   if (host === "antigravity") {
     const toolCall = asRecord(raw.toolCall);
@@ -123,8 +139,12 @@ export function normalizeCall(host: HookHost, raw: Record<string, unknown>, fall
       cwd,
       tool,
       kind: kindFor(tool),
-      path: firstString(args, ["AbsolutePath", "TargetFile", "SearchPath", "SearchDirectory", "DirectoryPath", "file_path", "path"]),
+      path: absolute(
+        firstString(args, ["AbsolutePath", "TargetFile", "SearchPath", "SearchDirectory", "DirectoryPath", "file_path", "path"]),
+        cwd
+      ),
       command: firstString(args, ["CommandLine", "command"]),
+      input: args,
     };
   }
 
@@ -136,27 +156,44 @@ export function normalizeCall(host: HookHost, raw: Record<string, unknown>, fall
       kind: "bash",
       path: null,
       command: asString(raw.command),
+      input: { command: raw.command },
     };
   }
-  if (host === "cursor" && (event === "beforeReadFile" || event === "afterFileEdit")) {
-    return {
-      cwd: asString(raw.cwd) ?? fallbackCwd,
-      tool: event === "beforeReadFile" ? "Read" : "Edit",
-      kind: event === "beforeReadFile" ? "read" : "write",
-      path: firstString(raw, ["file_path", "path"]),
-      command: null,
-    };
+  if (host === "cursor" && event === "beforeReadFile") {
+    const cwd = asString(raw.cwd) ?? fallbackCwd;
+    const file = firstString(raw, ["file_path", "path"]);
+    return { cwd, tool: "Read", kind: "read", path: absolute(file, cwd), command: null, input: { file_path: file } };
   }
 
   const toolInput = asRecord(raw.tool_input ?? raw.toolInput);
   const tool = asString(raw.tool_name ?? raw.toolName) ?? "";
+  const cwd = asString(toolInput.working_directory) ?? asString(raw.cwd) ?? fallbackCwd;
   return {
-    cwd: asString(raw.cwd) ?? fallbackCwd,
+    cwd,
     tool,
     kind: kindFor(tool),
-    path: firstString(toolInput, ["file_path", "path", "notebook_path", "target_file"]),
+    path: absolute(firstString(toolInput, ["file_path", "path", "notebook_path", "target_file"]), cwd),
     command: asString(toolInput.command),
+    input: toolInput,
   };
+}
+
+// Quebra o comando nos operadores de controle para que `pytest && curl ...` não passe só porque
+// começa com um prefixo permitido. Substituição de comando e redirecionamento de arquivo não têm
+// como ser checados por prefixo: null recusa o comando inteiro. `2>&1` é só duplicação de fd.
+export function shellSegments(command: string): string[] | null {
+  const cleaned = command.replace(/\d?>&\d/g, " ");
+  if (/[`<>]|\$\(/.test(cleaned)) return null;
+  return cleaned
+    .split(/&&|\|\||[;|&\n]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function segmentAllowed(part: string, allowlist: string[]): boolean {
+  if (part === "git" || part.startsWith("git ") || part === "cd" || part.startsWith("cd ")) return true;
+  if (ENGINE_COMMAND.test(part)) return true;
+  return allowlist.some((entry) => part === entry || part.startsWith(entry));
 }
 
 export function decide(call: NormalizedCall, caps: Capabilities): Decision {
@@ -174,11 +211,13 @@ export function decide(call: NormalizedCall, caps: Capabilities): Decision {
   }
   if (call.kind === "bash") {
     const command = call.command ?? "";
-    if (command.includes("spec_harness/harness.ts") || command.startsWith("git ")) {
-      return { allowed: true, reason: "" };
+    const parts = shellSegments(command);
+    if (!parts) {
+      return { allowed: false, reason: `comando com substituição ou redirecionamento de arquivo: ${command}` };
     }
-    if (!caps.bash.some((entry) => command === entry || command.startsWith(entry))) {
-      return { allowed: false, reason: `comando fora de capabilities.bash.commands: ${command}` };
+    const denied = parts.find((part) => !segmentAllowed(part, caps.bash));
+    if (denied !== undefined) {
+      return { allowed: false, reason: `comando fora de capabilities.bash.commands: ${denied}` };
     }
     return { allowed: true, reason: "" };
   }

@@ -1520,7 +1520,7 @@ function runClaudeJob(
   cfg: PostVerifyConfig,
   logPath: string
 ): Promise<PostVerifyResult> {
-  if (agentProvider() === "codex" || agentProvider() === "antigravity") {
+  if (host().selfContainedJobs) {
     if (job.plugin_dirs?.length || job.add_dirs?.length) {
       die(`job ${job.id}: ${agentProvider()} não traduz plugin_dirs/add_dirs do Claude; configure um prompt autocontido.`);
     }
@@ -1991,22 +1991,28 @@ function scopePath(value: string | null, worktree: string): string | null {
   return isWithin(value, worktree) ? path.relative(worktree, value) : value;
 }
 
-function findRunForCwd(cwd: string): RunState | null {
-  if (!fs.existsSync(RUNS_DIR)) return null;
-  for (const f of fs.readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json"))) {
-    const candidate = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), "utf-8")) as RunState;
-    if (cwd === candidate.worktree || isWithin(cwd, candidate.worktree)) return candidate;
+// Um arquivo de run corrompido não pode derrubar o hook: no Claude o crash libera a ferramenta e
+// no Cursor (failClosed) bloqueia tudo, inclusive fora do worktree.
+function loadRuns(): RunState[] {
+  if (!fs.existsSync(RUNS_DIR)) return [];
+  const runs: RunState[] = [];
+  for (const f of fs.readdirSync(RUNS_DIR).filter((name) => name.endsWith(".json"))) {
+    try {
+      runs.push(JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), "utf-8")) as RunState);
+    } catch {
+      // ignorado: sem worktree legível não há o que escopar
+    }
   }
-  return null;
+  return runs;
+}
+
+function findRunForCwd(cwd: string): RunState | null {
+  return loadRuns().find((run) => run.worktree && isWithin(cwd, run.worktree)) ?? null;
 }
 
 function findRunForPath(absPath: string | null): RunState | null {
-  if (!absPath || !path.isAbsolute(absPath) || !fs.existsSync(RUNS_DIR)) return null;
-  for (const f of fs.readdirSync(RUNS_DIR).filter((name) => name.endsWith(".json"))) {
-    const candidate = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), "utf-8")) as RunState;
-    if (candidate.worktree && isWithin(absPath, candidate.worktree)) return candidate;
-  }
-  return null;
+  if (!absPath || !path.isAbsolute(absPath)) return null;
+  return loadRuns().find((run) => run.worktree && isWithin(absPath, run.worktree)) ?? null;
 }
 
 function finishHook(host: HookHost, allowed: boolean, reason: string): never {
@@ -2042,7 +2048,7 @@ function cmdHookCheck(): void {
     JSON.stringify({
       ts: Date.now() / 1000,
       tool_name: call.tool,
-      tool_input: { path: call.path, command: call.command },
+      tool_input: call.input,
       reason: decision.reason,
     }) + "\n",
     "utf-8"
@@ -2413,19 +2419,31 @@ function cmdScaffoldPacket(args: string[]): void {
 
 type AgentName = "claude" | "codex" | "cursor" | "antigravity";
 
+interface HostProfile {
+  cli: string | null; // binário spawnado no autorun e no post_verify; null = sem modo headless
+  reuseSession: boolean; // retoma a sessão da fase anterior (implementer.prompts.retomada)
+  selfContainedJobs: boolean; // post_verify sem plugin_dirs/add_dirs do Claude; exit != 0 reprova a fase
+}
+
+const HOSTS: Record<AgentName, HostProfile> = {
+  claude: { cli: "claude", reuseSession: true, selfContainedJobs: false },
+  codex: { cli: "codex", reuseSession: false, selfContainedJobs: true },
+  cursor: { cli: null, reuseSession: false, selfContainedJobs: false },
+  antigravity: { cli: "agy", reuseSession: true, selfContainedJobs: true },
+};
+
+function isAgentName(value: string): value is AgentName {
+  return Object.hasOwn(HOSTS, value);
+}
+
 function agentProvider(): AgentName {
   const value = process.env.SPEC_HARNESS_AGENT ?? CFG().agent ?? "claude";
-  if (value !== "claude" && value !== "codex" && value !== "cursor" && value !== "antigravity") {
-    die(`agent inválido: ${value}`);
-  }
+  if (!isAgentName(value)) die(`agent inválido: ${value}`);
   return value;
 }
 
-function agentCli(agent: AgentName): string | null {
-  if (agent === "claude") return "claude";
-  if (agent === "codex") return "codex";
-  if (agent === "antigravity") return "agy";
-  return null;
+function host(): HostProfile {
+  return HOSTS[agentProvider()];
 }
 
 interface ImplementerConfig {
@@ -2554,15 +2572,8 @@ async function runImplementer(
   // sessão sem instrução de fase — inclusive sem a fronteira de escrita nova. Nesse caso o
   // reaproveitamento se desliga sozinho e o comportamento volta ao de antes: um upgrade do motor
   // não pode quebrar um repositório já configurado, nem afrouxar o enforcement em silêncio.
-  const reuse =
-    (agentProvider() === "claude" || agentProvider() === "antigravity") &&
-    cfg.reuse_session !== false &&
-    Boolean(cfg.prompts?.retomada);
-  if (
-    (agentProvider() === "claude" || agentProvider() === "antigravity") &&
-    cfg.reuse_session !== false &&
-    !cfg.prompts?.retomada
-  ) {
+  const reuse = host().reuseSession && cfg.reuse_session !== false && Boolean(cfg.prompts?.retomada);
+  if (host().reuseSession && cfg.reuse_session !== false && !cfg.prompts?.retomada) {
     console.log(
       `  AVISO: implementer.prompts.retomada ausente em ${path.relative(REPO_ROOT, CONFIG_PATH)} — ` +
         `cada fase abrirá sessão fria. Copie o prompt do template para reaproveitar a sessão.`
@@ -2738,7 +2749,7 @@ async function cmdAutorun(args: string[]): Promise<void> {
       const t0 = Date.now();
       const retomou = usaImplementador && Boolean(run.session_id);
       const code = usaImplementador ? await runImplementer(phase, packet, run, feedback, logPath) : 0;
-      if ((agentProvider() === "codex" || agentProvider() === "antigravity") && code !== 0) {
+      if (host().selfContainedJobs && code !== 0) {
         die(`${agentProvider()} terminou com exit ${code} na fase ${phase}; nenhuma aprovação concedida. Veja ${logPath}`);
       }
       const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
@@ -3157,30 +3168,67 @@ function aplicaDeteccao(perfil: PerfilJson, d: Deteccao): PerfilJson {
   return out;
 }
 
+const PLUGIN_SKILLS = ["sdd", "spec-harness", "spec-orchestrator", "qa-tester"];
+
+// Só eventos que bloqueiam. O Cursor não tem evento antes da escrita: ela é barrada no preToolUse.
+const CURSOR_HOOK_EVENTS = ["beforeReadFile", "beforeShellExecution", "preToolUse"];
+
 const REVIEW_PROMPT =
   "Revise git diff {base}...{branch} para a spec {spec}. Leia AGENTS.md. Avalie bugs, contratos e testes. " +
   'Grave {out}/code-review.json com {"findings":[{"blocking":true,"description":"problema concreto"}]}; ' +
   "se não houver achados, findings deve ser []. Não edite código de produção nem testes e não faça commits.";
 
-function applyAgentProfile(perfil: PerfilJson, selectedAgent: string): void {
+// Alias de modelo do Claude não serve para outro host; um modelo escolhido para o host fica.
+const CLAUDE_MODEL = /^(sonnet|opus|haiku|fable)$|claude/i;
+
+// Ajusta a config ao host. Numa config nova (`fresh`) aplica o perfil inteiro do host. Numa config
+// existente só muda o que o host exige para funcionar e devolve a lista do que mudou — jobs de
+// post_verify, gate e modelo que o usuário escolheu e o host aceita ficam como estão.
+function applyAgentProfile(perfil: PerfilJson, selectedAgent: string, fresh: boolean): string[] {
+  const changes: string[] = [];
+  if (perfil.agent !== selectedAgent) changes.push(`agent: ${String(perfil.agent ?? "claude")} → ${selectedAgent}`);
   perfil.agent = selectedAgent;
-  if (selectedAgent === "claude") return;
-  const implementer = perfil.implementer as Record<string, unknown>;
-  delete implementer.model;
-  const wt = perfil.worktree as { copy_paths?: string[] };
-  wt.copy_paths = (wt.copy_paths ?? []).filter((entry) => entry !== ".claude/settings.json");
-  if (selectedAgent === "cursor") {
-    implementer.reuse_session = false;
-    perfil.post_verify = { enabled: false, gate: "warn", jobs: [] };
-    return;
+  if (selectedAgent === "claude") return changes;
+
+  const implementer = (perfil.implementer ??= {}) as Record<string, unknown>;
+  if (typeof implementer.model === "string" && (fresh || CLAUDE_MODEL.test(implementer.model))) {
+    changes.push(`implementer.model removido (${implementer.model} é do Claude)`);
+    delete implementer.model;
   }
-  if (selectedAgent === "codex") implementer.reuse_session = false;
-  perfil.post_verify = {
-    enabled: true,
-    gate: "block",
-    require_quiz_pass: false,
-    jobs: [{ id: "code_review", prompt: REVIEW_PROMPT }],
-  };
+  if (!HOSTS[selectedAgent as AgentName].reuseSession && implementer.reuse_session !== false) {
+    implementer.reuse_session = false;
+    changes.push("implementer.reuse_session: false");
+  }
+  const wt = (perfil.worktree ??= {}) as { copy_paths?: string[] };
+  if ((wt.copy_paths ?? []).includes(".claude/settings.json")) {
+    wt.copy_paths = (wt.copy_paths ?? []).filter((entry) => entry !== ".claude/settings.json");
+    changes.push("worktree.copy_paths sem .claude/settings.json");
+  }
+
+  const pv = (perfil.post_verify ?? {}) as Record<string, unknown>;
+  if (selectedAgent === "cursor") {
+    perfil.post_verify = fresh ? { enabled: false, gate: "warn", jobs: [] } : { ...pv, enabled: false };
+    if (pv.enabled !== false) changes.push("post_verify.enabled: false (Cursor não roda revisão headless)");
+    return changes;
+  }
+  const jobs = (fresh ? [] : ((pv.jobs ?? []) as PostVerifyJob[])).filter(
+    (job) => !job.plugin_dirs?.length && !job.add_dirs?.length
+  );
+  const dropped = ((pv.jobs ?? []) as PostVerifyJob[]).length - jobs.length;
+  if (!fresh && dropped > 0) changes.push(`post_verify: ${dropped} job(s) com plugin_dirs/add_dirs do Claude removido(s)`);
+  if (jobs.length > 0) {
+    perfil.post_verify = { ...pv, require_quiz_pass: false, jobs };
+  } else {
+    perfil.post_verify = {
+      ...(fresh ? {} : pv),
+      enabled: true,
+      gate: fresh ? "block" : (pv.gate ?? "block"),
+      require_quiz_pass: false,
+      jobs: [{ id: "code_review", prompt: REVIEW_PROMPT }],
+    };
+    if (!fresh) changes.push("post_verify: job code_review autocontido adicionado");
+  }
+  return changes;
 }
 
 function hookCommand(host: HookHost): string {
@@ -3191,7 +3239,6 @@ function hookCommand(host: HookHost): string {
 function ensureCursorHooks(): "criado" | "atualizado" | "já presente" {
   const settingsPath = path.join(REPO_ROOT, ".cursor", "hooks.json");
   const command = hookCommand("cursor");
-  const events = ["beforeReadFile", "beforeShellExecution", "preToolUse", "afterFileEdit"];
   const current: { version: number; hooks: Record<string, Array<{ command?: string; failClosed?: boolean }>> } =
     fs.existsSync(settingsPath)
       ? (JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as {
@@ -3202,7 +3249,14 @@ function ensureCursorHooks(): "criado" | "atualizado" | "já presente" {
   current.version = 1;
   current.hooks ??= {};
   let changed = !fs.existsSync(settingsPath);
-  for (const event of events) {
+  // afterFileEdit roda depois da escrita e não bloqueia; versões anteriores instalavam a guarda nele.
+  const stale = current.hooks.afterFileEdit;
+  if (stale?.some((hook) => /hook-guard\.sh/.test(hook.command ?? ""))) {
+    current.hooks.afterFileEdit = stale.filter((hook) => !/hook-guard\.sh/.test(hook.command ?? ""));
+    if (current.hooks.afterFileEdit.length === 0) delete current.hooks.afterFileEdit;
+    changed = true;
+  }
+  for (const event of CURSOR_HOOK_EVENTS) {
     const list = current.hooks[event] ?? [];
     const existing = list.find((hook) => /hook-guard\.sh/.test(hook.command ?? ""));
     if (!existing) {
@@ -3226,7 +3280,7 @@ function installCursorSkills(): void {
   const srcRoot = path.join(HARNESS_DIR, "..", "skills");
   const destRoot = path.join(REPO_ROOT, ".cursor", "skills");
   fs.mkdirSync(destRoot, { recursive: true });
-  for (const name of ["sdd", "spec-harness", "spec-orchestrator", "qa-tester"]) {
+  for (const name of PLUGIN_SKILLS) {
     const src = path.join(srcRoot, name);
     const dest = path.join(destRoot, name);
     if (!fs.existsSync(src)) die(`skill ausente no plugin: ${src}`);
@@ -3273,7 +3327,7 @@ function cmdInitRepo(args: string[]): void {
   const force = args.includes("--force");
   const agentIndex = args.indexOf("--agent");
   const selectedAgent = agentIndex >= 0 ? args[agentIndex + 1] : process.env.SPEC_HARNESS_AGENT ?? "claude";
-  if (!["claude", "codex", "cursor", "antigravity"].includes(selectedAgent)) {
+  if (!isAgentName(selectedAgent)) {
     die("init-repo --agent deve ser claude, codex, cursor ou antigravity");
   }
   const template = path.join(HARNESS_DIR, "templates", "harness.config.template.json");
@@ -3286,11 +3340,14 @@ function cmdInitRepo(args: string[]): void {
   if (jaExiste && !force) {
     if (agentIndex >= 0) {
       const cfg = JSON.parse(fs.readFileSync(dest, "utf-8")) as PerfilJson;
-      applyAgentProfile(cfg, selectedAgent);
-      fs.writeFileSync(dest, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+      const changes = applyAgentProfile(cfg, selectedAgent, false);
+      if (changes.length > 0) fs.writeFileSync(dest, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
       console.log(
-        `Config já existe; perfil do agent ${selectedAgent} aplicado. Use --force para regerar a detecção de stack.`
+        `Config já existe: ${path.relative(REPO_ROOT, dest)}. ` +
+          (changes.length > 0 ? `Ajustes exigidos por ${selectedAgent}:` : `Nada a ajustar para ${selectedAgent}.`)
       );
+      for (const change of changes) console.log(`  ${change}`);
+      console.log("  O resto foi preservado. Use --force para regerar a partir da detecção.");
     } else {
       console.log(`Config já existe: ${path.relative(REPO_ROOT, dest)} (use --force para regerar a partir da detecção).`);
     }
@@ -3298,7 +3355,7 @@ function cmdInitRepo(args: string[]): void {
     console.log("Detectando o perfil do repositório...");
     const d = detectaPerfil();
     const perfil = aplicaDeteccao(JSON.parse(fs.readFileSync(template, "utf-8")) as PerfilJson, d);
-    applyAgentProfile(perfil, selectedAgent);
+    applyAgentProfile(perfil, selectedAgent, true);
     fs.mkdirSync(destDir, { recursive: true });
     fs.writeFileSync(dest, JSON.stringify(perfil, null, 2) + "\n", "utf-8");
     console.log(`Config ${jaExiste ? "regerada" : "criada"}: ${path.relative(REPO_ROOT, dest)}`);
@@ -3460,7 +3517,7 @@ function diagnostico(): Problema[] {
 
   const settingsPath = path.join(REPO_ROOT, ".claude", "settings.json");
   const agent = agentProvider();
-  const cli = agentCli(agent);
+  const cli = HOSTS[agent].cli;
   if (agent === "codex") {
     add("AVISO", "hook", "Codex usa sandbox workspace-write e auditoria pós-fase; não há bloqueio preventivo de leitura/escrita por packet.");
     if (!temBinario("codex")) add("ERRO", "agent", "CLI codex não está no PATH.");
@@ -3472,7 +3529,7 @@ function diagnostico(): Problema[] {
         const parsed = JSON.parse(fs.readFileSync(cursorHooks, "utf-8")) as {
           hooks?: Record<string, Array<{ command?: string; failClosed?: boolean }>>;
         };
-        return ["beforeReadFile", "beforeShellExecution", "preToolUse", "afterFileEdit"].every((event) =>
+        return CURSOR_HOOK_EVENTS.every((event) =>
           (parsed.hooks?.[event] ?? []).some(
             (hook) => /hook-guard\.sh/.test(hook.command ?? "") && hook.failClosed === true && (hook.command ?? "").includes("SPEC_HARNESS_HOOK_HOST=cursor")
           )
@@ -3484,7 +3541,7 @@ function diagnostico(): Problema[] {
     if (!cursorOk) {
       add("ERRO", "hook", `.cursor/hooks.json sem a guarda failClosed — rode \`${CLI} init-repo --agent cursor\`.`);
     }
-    for (const name of ["sdd", "spec-harness", "spec-orchestrator", "qa-tester"]) {
+    for (const name of PLUGIN_SKILLS) {
       const skill = path.join(REPO_ROOT, ".cursor", "skills", name);
       if (!fs.existsSync(skill)) add("ERRO", "skills", `skill ausente: .cursor/skills/${name}`);
     }
@@ -3567,15 +3624,15 @@ function diagnostico(): Problema[] {
   }
 
   const pv = cfg.post_verify ?? {};
-    if (pv.enabled) {
-      if (agent === "cursor") {
-        add("AVISO", "post_verify", "Cursor não spawna a revisão headless; o job fica para a sessão do editor.");
-      } else if (cli && !temBinario(cli)) {
-        add("ERRO", "post_verify", `CLI ${cli} não está no PATH.`);
-      }
-      for (const job of pv.jobs ?? []) {
+  if (pv.enabled) {
+    if (!cli) {
+      add("AVISO", "post_verify", `${agent} não spawna a revisão headless; o job fica para a sessão do editor.`);
+    } else if (!temBinario(cli)) {
+      add("ERRO", "post_verify", `CLI ${cli} não está no PATH.`);
+    }
+    for (const job of pv.jobs ?? []) {
       if (!job.prompt) add("ERRO", `post_verify.${job.id}`, "job sem prompt.");
-      if ((agent === "codex" || agent === "antigravity") && (job.plugin_dirs?.length || job.add_dirs?.length)) {
+      if (HOSTS[agent].selfContainedJobs && (job.plugin_dirs?.length || job.add_dirs?.length)) {
         add("ERRO", `post_verify.${job.id}`, `${agent} exige job autocontido, sem plugin_dirs/add_dirs do Claude.`);
       }
       for (const d of [...(job.add_dirs ?? []), ...(job.plugin_dirs ?? [])]) {
@@ -3600,7 +3657,7 @@ function diagnostico(): Problema[] {
   for (const fase of ["red", "green"]) {
     if (!impl?.prompts?.[fase]) add("ERRO", `implementer.prompts.${fase}`, "ausente — o autorun não teria o que mandar para a sessão da fase.");
   }
-  if (impl?.reuse_session !== false && agent !== "cursor" && agent !== "codex" && !impl?.prompts?.retomada) {
+  if (impl?.reuse_session !== false && HOSTS[agent].reuseSession && !impl?.prompts?.retomada) {
     add(
       "AVISO",
       "implementer.prompts.retomada",

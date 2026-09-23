@@ -53,8 +53,10 @@ const BASH_TOOLS = new Set(["bash", "shell", "run_command"]);
 // ("PreToolUse"): confundir os dois faz o Claude receber JSON do Cursor com exit 0 e liberar tudo.
 const CURSOR_EVENTS = new Set(["beforeReadFile", "beforeShellExecution", "beforeMCPExecution", "preToolUse"]);
 
-// O motor chamado pelo caminho da instalação manual (.claude/spec_harness) ou do plugin (engine/).
-const ENGINE_COMMAND = /^node\s+\S*(spec_harness|engine)\/harness\.ts(\s|$)/;
+// Só o motor de verdade: instalação manual ou o engine do plugin. O prefixo solto
+// `\S*(engine|spec_harness)/harness.ts` deixava o agente gravar `app/engine/harness.ts`
+// (dentro do glob de escrita) e executá-lo fora da allowlist.
+const ENGINE_SCRIPT = /(?:^|\/)(?:plugins\/spec-harness\/engine\/harness\.ts|\.claude\/spec_harness\/harness\.ts)$/;
 
 export function globToRegex(pattern: string): RegExp {
   let re = "";
@@ -287,12 +289,21 @@ function gitAllowed(part: string, cwd: string): boolean {
   return GIT_SUBCOMMANDS.has(words[i] ?? "");
 }
 
-function segmentAllowed(part: string, allowlist: string[], cwd: string): boolean {
+function engineCommandAllowed(part: string, cwd: string, writeGlobs: string[]): boolean {
+  const match = /^node\s+(\S+)(?:\s|$)/.exec(part);
+  if (!match || !ENGINE_SCRIPT.test(match[1])) return false;
+  const rel = path.relative(cwd, path.resolve(cwd, match[1]));
+  const inside = rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  if (inside && matchesAny(rel, writeGlobs)) return false;
+  return true;
+}
+
+function segmentAllowed(part: string, allowlist: string[], cwd: string, writeGlobs: string[]): boolean {
   const commandPrefix = (entry: string): boolean =>
     part === entry || (part.startsWith(entry) && /\s/.test(part[entry.length] ?? ""));
   if (ALWAYS_ALLOWED.some(commandPrefix)) return true;
   if (/^git(?:\s|$)/.test(part)) return gitAllowed(part, cwd);
-  if (ENGINE_COMMAND.test(part)) return true;
+  if (engineCommandAllowed(part, cwd, writeGlobs)) return true;
   return allowlist.some(commandPrefix);
 }
 
@@ -325,7 +336,7 @@ export function decide(call: NormalizedCall, caps: Capabilities): Decision {
     if (!parts) {
       return { allowed: false, reason: `comando com substituição ou redirecionamento de arquivo: ${command}` };
     }
-    const denied = parts.find((part) => !segmentAllowed(part, caps.bash, call.cwd));
+    const denied = parts.find((part) => !segmentAllowed(part, caps.bash, call.cwd, caps.write));
     if (denied !== undefined) {
       return { allowed: false, reason: `comando fora de capabilities.bash.commands: ${denied}` };
     }

@@ -409,6 +409,17 @@ test('git só por subcomando permitido e sem opção que executa programa', () =
   ]) assert.equal(bash(no).allowed, false, no);
 });
 
+test('node harness.ts só passa no caminho canônico, não num script plantado', () => {
+  const bash = (command) => decide(normalizeCall('claude', { tool_name: 'Bash', tool_input: { command } }, '/wt'), caps);
+  assert.equal(bash('node /p/plugins/spec-harness/engine/harness.ts verify-packet x.yaml').allowed, true);
+  assert.equal(bash('node plugins/spec-harness/engine/harness.ts doctor').allowed, true);
+  assert.equal(bash('node .claude/spec_harness/harness.ts doctor').allowed, true);
+  assert.equal(bash('node app/engine/harness.ts').allowed, false);
+  assert.equal(bash('node app/spec_harness/harness.ts').allowed, false);
+  assert.equal(bash('node app/plugins/spec-harness/engine/harness.ts').allowed, false);
+  assert.equal(bash('node /tmp/evil/engine/harness.ts').allowed, false);
+});
+
 test('AGENTS.md, CLAUDE.md e GEMINI.md na raiz são legíveis; só leitura e só na raiz', () => {
   // decide recebe o path já relativo ao worktree (scopePath no harness).
   const call = (tool, file_path) => decide(

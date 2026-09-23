@@ -2,7 +2,9 @@
 // A regra em si é a do hook Claude: leitura nos globs de read+write, escrita só nos de write,
 // Bash por prefixo, segmento a segmento. Não afrouxe isto ao adicionar um host.
 
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type HookHost = "claude" | "cursor" | "antigravity";
 
@@ -57,6 +59,10 @@ const CURSOR_EVENTS = new Set(["beforeReadFile", "beforeShellExecution", "before
 // `\S*(engine|spec_harness)/harness.ts` deixava o agente gravar `app/engine/harness.ts`
 // (dentro do glob de escrita) e executá-lo fora da allowlist.
 const ENGINE_SCRIPT = /(?:^|\/)(?:plugins\/spec-harness\/engine\/harness\.ts|\.claude\/spec_harness\/harness\.ts)$/;
+// O motor que está rodando este hook. É o caminho que o CLI imprime para o agente; no plugin fica
+// no cache versionado (~/.claude/plugins/cache/<marketplace>/spec-harness/<versão>/engine/), que o
+// regex acima não cobre.
+const SELF_ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), "harness.ts");
 
 export function globToRegex(pattern: string): RegExp {
   let re = "";
@@ -291,8 +297,11 @@ function gitAllowed(part: string, cwd: string): boolean {
 
 function engineCommandAllowed(part: string, cwd: string, writeGlobs: string[]): boolean {
   const match = /^node\s+(\S+)(?:\s|$)/.exec(part);
-  if (!match || !ENGINE_SCRIPT.test(match[1])) return false;
-  const rel = path.relative(cwd, path.resolve(cwd, match[1]));
+  if (!match) return false;
+  const script = match[1].startsWith("~/") ? path.join(os.homedir(), match[1].slice(2)) : match[1];
+  const resolved = path.resolve(cwd, script);
+  if (resolved !== SELF_ENGINE && !ENGINE_SCRIPT.test(match[1])) return false;
+  const rel = path.relative(cwd, resolved);
   const inside = rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
   if (inside && matchesAny(rel, writeGlobs)) return false;
   return true;

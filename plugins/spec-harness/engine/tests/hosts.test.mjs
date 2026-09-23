@@ -420,6 +420,30 @@ test('node harness.ts só passa no caminho canônico, não num script plantado',
   assert.equal(bash('node /tmp/evil/engine/harness.ts').allowed, false);
 });
 
+test('node harness.ts passa no motor instalado pelo plugin (cache versionado, com ~)', t => {
+  // O CLI impresso para o agente é o caminho do próprio motor, que no plugin fica em
+  // ~/.claude/plugins/cache/<marketplace>/spec-harness/<versão>/engine/harness.ts.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const installed = path.join(home, '.claude/plugins/cache/spec-harness/spec-harness/1.2.0/engine');
+  fs.mkdirSync(installed, { recursive: true });
+  fs.copyFileSync(path.join(engine, 'hook-decision.ts'), path.join(installed, 'hook-decision.ts'));
+  const script = `
+    const { decide, normalizeCall } = await import(${JSON.stringify(path.join(installed, 'hook-decision.ts'))});
+    const caps = { read: ['app/**'], write: ['app/**'], bash: [] };
+    const bash = (command) => decide(normalizeCall('claude', { tool_name: 'Bash', tool_input: { command } }, '/wt'), caps).allowed;
+    console.log(JSON.stringify([
+      bash('node ~/.claude/plugins/cache/spec-harness/spec-harness/1.2.0/engine/harness.ts verify-packet x.yaml'),
+      bash(${JSON.stringify(`node ${installed}/harness.ts verify-packet x.yaml`)}),
+      bash('node ~/.claude/plugins/cache/spec-harness/spec-harness/0.9.0/engine/harness.ts doctor'),
+    ]));`;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  assert.deepEqual(JSON.parse(out), [true, true, false]);
+});
+
 test('AGENTS.md, CLAUDE.md e GEMINI.md na raiz são legíveis; só leitura e só na raiz', () => {
   // decide recebe o path já relativo ao worktree (scopePath no harness).
   const call = (tool, file_path) => decide(

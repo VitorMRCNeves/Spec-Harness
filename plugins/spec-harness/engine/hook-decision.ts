@@ -260,28 +260,38 @@ const ALWAYS_ALLOWED = ["cd", "echo", "pwd", "true", "false"];
 // restore/checkout/rm/mv/clean mexem na árvore por fora dos globs de escrita. Fica o que lê e o
 // add/commit dos checkpoints do GREEN (hooks em .git/ estão fora de qualquer glob de escrita).
 const GIT_SUBCOMMANDS = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "grep", "add", "commit"]);
-// Opções que executam programa ou trocam a config em tempo de execução.
-const GIT_EXEC_OPTION = /(^|\s)(-O|--open-files-in-pager|--ext-diff|--textconv|--upload-pack|--receive-pack)(\s|=|$)/;
+// Opções que executam programa, trocam a config, leem arquivo arbitrário (--no-index)
+// ou gravam um path escolhido (--output).
+const GIT_EXEC_OPTION = /(^|\s)(-O|--open-files-in-pager|--ext-diff|--textconv|--upload-pack|--receive-pack|--no-index|--output)(\s|=|$)/;
 
-function gitAllowed(part: string): boolean {
+function pathWithin(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function gitAllowed(part: string, cwd: string): boolean {
   const words = part.split(/\s+/);
   if (words[0] !== "git") return false;
   if (GIT_EXEC_OPTION.test(part)) return false;
   let i = 1;
   // Opções globais aceitas antes do subcomando; qualquer outra recusa.
+  // -C fica restrito ao cwd do comando: `git -C /outro add` escreve noutro repositório.
   while (i < words.length && words[i].startsWith("-")) {
-    if (words[i] === "-C") i += 2;
-    else if (words[i] === "--no-pager") i += 1;
+    if (words[i] === "-C") {
+      const target = words[i + 1];
+      if (!target || !pathWithin(path.resolve(cwd, target), cwd)) return false;
+      i += 2;
+    } else if (words[i] === "--no-pager") i += 1;
     else return false;
   }
   return GIT_SUBCOMMANDS.has(words[i] ?? "");
 }
 
-function segmentAllowed(part: string, allowlist: string[]): boolean {
+function segmentAllowed(part: string, allowlist: string[], cwd: string): boolean {
   const commandPrefix = (entry: string): boolean =>
     part === entry || (part.startsWith(entry) && /\s/.test(part[entry.length] ?? ""));
   if (ALWAYS_ALLOWED.some(commandPrefix)) return true;
-  if (/^git(?:\s|$)/.test(part)) return gitAllowed(part);
+  if (/^git(?:\s|$)/.test(part)) return gitAllowed(part, cwd);
   if (ENGINE_COMMAND.test(part)) return true;
   return allowlist.some(commandPrefix);
 }
@@ -315,7 +325,7 @@ export function decide(call: NormalizedCall, caps: Capabilities): Decision {
     if (!parts) {
       return { allowed: false, reason: `comando com substituição ou redirecionamento de arquivo: ${command}` };
     }
-    const denied = parts.find((part) => !segmentAllowed(part, caps.bash));
+    const denied = parts.find((part) => !segmentAllowed(part, caps.bash, call.cwd));
     if (denied !== undefined) {
       return { allowed: false, reason: `comando fora de capabilities.bash.commands: ${denied}` };
     }

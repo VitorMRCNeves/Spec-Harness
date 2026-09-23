@@ -404,6 +404,8 @@ test('git só por subcomando permitido e sem opção que executa programa', () =
     "git -c alias.x='!sh -c id' x", 'git -c core.pager=id log', 'git config alias.x "!id"',
     'git restore secrets.txt', 'git checkout -- secrets.txt', 'git rm secrets.txt', 'git clean -fd',
     'git grep -O id foo', 'git diff --ext-diff', 'git --exec-path=/tmp log', 'git reset --hard', 'git push',
+    'git -C /other add .', 'git -C /wt/../other status', 'git -C ../other commit -m x',
+    'git diff --no-index /etc/passwd /etc/group', 'git diff --output=/tmp/pwned', 'git show --output /tmp/pwned',
   ]) assert.equal(bash(no).allowed, false, no);
 });
 

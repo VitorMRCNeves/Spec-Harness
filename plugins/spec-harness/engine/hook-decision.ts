@@ -93,8 +93,9 @@ export function matchesAny(relPath: string, patterns: string[]): boolean {
 
 export function detectHost(raw: Record<string, unknown>, envHost?: string): HookHost {
   if (envHost === "cursor" || envHost === "antigravity" || envHost === "claude") return envHost;
-  if (raw.toolCall && typeof raw.toolCall === "object") return "antigravity";
-  if (typeof raw.hook_event_name === "string" && CURSOR_EVENTS.has(raw.hook_event_name)) return "cursor";
+  // Se não tem variável de ambiente, é o hook do Claude CLI, que não a exporta.
+  // Ignoramos o payload porque um comando forjado com eventos do Cursor faria a guarda 
+  // do Claude responder no formato do Cursor (exit 0), o que o Claude interpreta como permissão concedida.
   return "claude";
 }
 
@@ -260,7 +261,7 @@ const ALWAYS_ALLOWED = ["cd", "echo", "pwd", "true", "false"];
 // add/commit dos checkpoints do GREEN (hooks em .git/ estão fora de qualquer glob de escrita).
 const GIT_SUBCOMMANDS = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "grep", "add", "commit"]);
 // Opções que executam programa ou trocam a config em tempo de execução.
-const GIT_EXEC_OPTION = /(^|\s)(-c|--config-env|--exec-path|-O|--open-files-in-pager|--ext-diff|--textconv|--upload-pack|--receive-pack)(\s|=|$)/;
+const GIT_EXEC_OPTION = /(^|\s)(-O|--open-files-in-pager|--ext-diff|--textconv|--upload-pack|--receive-pack)(\s|=|$)/;
 
 function gitAllowed(part: string): boolean {
   const words = part.split(/\s+/);
@@ -291,12 +292,18 @@ const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"];
 
 export function decide(call: NormalizedCall, caps: Capabilities): Decision {
   if (call.kind === "read") {
+    if (call.path && path.isAbsolute(call.path)) {
+      return { allowed: false, reason: `path fora do worktree: ${call.path}` };
+    }
     if (call.path && !INSTRUCTION_FILES.includes(call.path) && !matchesAny(call.path, [...caps.read, ...caps.write])) {
       return { allowed: false, reason: `path fora de capabilities.read.paths: ${call.path}` };
     }
     return { allowed: true, reason: "" };
   }
   if (call.kind === "write") {
+    if (call.path && path.isAbsolute(call.path)) {
+      return { allowed: false, reason: `path fora do worktree: ${call.path}` };
+    }
     if (call.path && !matchesAny(call.path, caps.write)) {
       return { allowed: false, reason: `path fora de capabilities.write.paths: ${call.path}` };
     }

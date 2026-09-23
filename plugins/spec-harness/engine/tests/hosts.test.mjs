@@ -49,7 +49,7 @@ test('a decisão é a mesma para os três hosts', () => {
     caps,
   );
   assert.equal(denied.allowed, false);
-  assert.match(denied.reason, /capabilities.read/);
+  assert.match(denied.reason, /fora do worktree|capabilities.read/);
 
   assert.equal(decide(
     normalizeCall('claude', { tool_name: 'Bash', tool_input: { command: 'git status' } }, '/repo'),
@@ -252,8 +252,8 @@ test('init-repo recusa agent desconhecido', t => {
 test('payload real do Claude, sem SPEC_HARNESS_HOOK_HOST, bloqueia com exit 2', t => {
   // O Claude manda hook_event_name "PreToolUse"; o hook do plugin não define a variável de host.
   const f = gitRepo(t);
-  assert.equal(detectHost({ hook_event_name: 'PreToolUse', tool_name: 'Write' }), 'claude');
-  assert.equal(detectHost({ hook_event_name: 'preToolUse', tool_name: 'Write' }), 'cursor');
+  assert.equal(detectHost({}, undefined), 'claude', 'fallback default');
+  
   const env = { ...f.env };
   delete env.SPEC_HARNESS_HOOK_HOST;
   const result = spawnSync(guard, [], {
@@ -268,6 +268,17 @@ test('payload real do Claude, sem SPEC_HARNESS_HOOK_HOST, bloqueia com exit 2', 
   assert.equal(result.status, 2, result.stdout + result.stderr);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /capabilities.write/);
+
+  // Impede bypass onde o modelo gera JSON fingindo ser Cursor para o hook do Claude responder com exit 0 (allow para Claude).
+  const bypass = spawnSync(guard, [], {
+    cwd: f.repo, env,
+    input: JSON.stringify({
+      hook_event_name: 'beforeShellExecution', cwd: f.repo,
+      command: 'rm -rf /'
+    }),
+    encoding: 'utf8',
+  });
+  assert.equal(bypass.status, 2, bypass.stdout + bypass.stderr);
 });
 
 test('preToolUse do Cursor com path relativo a working_directory acha a run e bloqueia', t => {
@@ -387,6 +398,7 @@ test('git só por subcomando permitido e sem opção que executa programa', () =
   for (const ok of [
     'git status', 'git -C /wt log --oneline -3', 'git --no-pager diff', 'git show HEAD',
     'git add app/x.py && git commit -m "spec: checkpoint" -m "Co-authored-by: Codex <noreply@openai.com>"',
+    'git log -c', 'git diff -c',
   ]) assert.equal(bash(ok).allowed, true, ok);
   for (const no of [
     "git -c alias.x='!sh -c id' x", 'git -c core.pager=id log', 'git config alias.x "!id"',
@@ -404,4 +416,13 @@ test('AGENTS.md, CLAUDE.md e GEMINI.md na raiz são legíveis; só leitura e só
   for (const file of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']) assert.equal(call('Read', file).allowed, true, file);
   assert.equal(call('Read', 'docs/AGENTS.md').allowed, false);
   assert.equal(call('Write', 'AGENTS.md').allowed, false);
+});
+
+test('paths absolutos fora do worktree não dão bypass com glob curinga (*)', () => {
+  // Simula o que scopePath faz: se estiver fora do worktree, devolve o path absoluto
+  const call = { cwd: '/wt', tool: 'write', kind: 'write', path: '/etc/passwd', command: null, input: {} };
+  const wildcardCaps = { read: [], write: ['*'], bash: [] };
+  const decision = decide(call, wildcardCaps);
+  assert.equal(decision.allowed, false, 'o path absoluto não deve passar, mesmo com glob "*"');
+  assert.match(decision.reason, /fora do worktree/);
 });

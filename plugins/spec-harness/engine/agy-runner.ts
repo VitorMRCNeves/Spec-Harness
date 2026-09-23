@@ -1,6 +1,4 @@
-import { spawn } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
+import { DEFAULT_TIMEOUT_MS, runHeadless } from "./headless.ts";
 
 export interface AgyJob {
   cwd: string;
@@ -11,8 +9,6 @@ export interface AgyJob {
   conversationId?: string;
   skip_permissions?: boolean;
 }
-
-const DEFAULT_TIMEOUT_MS = 2_400_000;
 
 // `agy -p` não trabalha no cwd: sem --add-dir ele escreve em ~/.gemini/antigravity-cli/scratch,
 // devolve SUCCESS e o worktree fica intocado. E o modo print desiste sozinho em 5 min
@@ -52,34 +48,8 @@ export function interpretAgyOutput(
 }
 
 export function runAntigravity(job: AgyJob): Promise<{ code: number; conversationId?: string }> {
-  return new Promise((resolve) => {
-    // O log é gravado enquanto a fase roda: num timeout de 40 min ele é o único rastro do que houve.
-    fs.mkdirSync(path.dirname(job.logPath), { recursive: true });
-    fs.writeFileSync(job.logPath, "", "utf-8");
-    const log = (text: string) => fs.appendFileSync(job.logPath, text, "utf-8");
-    let stdout = "";
-    let settled = false;
-    const finish = (code: number | null) => {
-      if (settled) return;
-      settled = true;
-      resolve(interpretAgyOutput(code, stdout));
-    };
-    const child = spawn("agy", agyArgs(job), {
-      cwd: job.cwd,
-      env: process.env,
-      timeout: (job.timeout_ms ?? DEFAULT_TIMEOUT_MS) + 30_000, // folga para o agy encerrar sozinho
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stdout.on("data", (data) => {
-      const text = String(data);
-      stdout += text;
-      log(text);
-    });
-    child.stderr.on("data", (data) => log(String(data)));
-    child.on("error", (error) => {
-      log(`\n[spawn error] ${String(error)}`);
-      finish(1);
-    });
-    child.on("close", (code) => finish(code));
-  });
+  const timeout_ms = (job.timeout_ms ?? DEFAULT_TIMEOUT_MS) + 30_000; // folga para o agy encerrar sozinho
+  return runHeadless("agy", agyArgs(job), { cwd: job.cwd, logPath: job.logPath, timeout_ms }).then(
+    ({ exitCode, stdout }) => interpretAgyOutput(exitCode, stdout)
+  );
 }

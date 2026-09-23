@@ -179,19 +179,84 @@ export function normalizeCall(host: HookHost, raw: Record<string, unknown>, fall
 }
 
 // Quebra o comando nos operadores de controle para que `pytest && curl ...` não passe só porque
-// começa com um prefixo permitido. Substituição de comando e redirecionamento de arquivo não têm
-// como ser checados por prefixo: null recusa o comando inteiro. `2>&1` é só duplicação de fd.
+// começa com um prefixo permitido. Respeita aspas: `git commit -m "a; b <x>"` é um segmento só — o
+// Cursor injeta `--trailer "Co-authored-by: Cursor <...>"` em todo commit. Substituição de comando
+// (`$(`, crase — também dentro de aspas duplas) e redirecionamento para arquivo não têm como ser
+// checados por prefixo: null recusa o comando inteiro. Duplicar fd (`2>&1`) e mandar para
+// /dev/null não escrevem em arquivo nenhum e passam.
 export function shellSegments(command: string): string[] | null {
-  const cleaned = command.replace(/\d?>&\d/g, " ");
-  if (/[`<>]|\$\(/.test(cleaned)) return null;
-  return cleaned
-    .split(/&&|\|\||[;|&\n]/)
-    .map((part) => part.trim())
-    .filter(Boolean);
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      current += c;
+      continue;
+    }
+    if (c === "`" || (c === "$" && command[i + 1] === "(")) return null;
+    if (quote === '"') {
+      if (c === "\\") {
+        current += c + (command[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (c === '"') quote = null;
+      current += c;
+      continue;
+    }
+    if (c === "\\") {
+      current += c + (command[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      current += c;
+      continue;
+    }
+    if (c === ">" || c === "<") {
+      const rest = command.slice(i);
+      const dup = /^>&\d/.exec(rest);
+      const devnull = /^>{1,2}\s*\/dev\/null(?=[\s;&|)]|$)/.exec(rest);
+      if (c === ">" && (dup || devnull)) {
+        const match = (dup ?? devnull) as RegExpExecArray;
+        current += match[0];
+        i += match[0].length - 1;
+        continue;
+      }
+      return null;
+    }
+    const two = command.slice(i, i + 2);
+    if (two === "&&" || two === "||") {
+      segments.push(current);
+      current = "";
+      i++;
+      continue;
+    }
+    if (c === "&" && command[i + 1] === ">") {
+      current += c; // &>/dev/null: o > seguinte decide
+      continue;
+    }
+    if (c === ";" || c === "|" || c === "&" || c === "\n") {
+      segments.push(current);
+      current = "";
+      continue;
+    }
+    current += c;
+  }
+  if (quote) return null; // aspa aberta: o shell não rodaria isso como a gente leu
+  segments.push(current);
+  return segments.map((part) => part.trim()).filter(Boolean);
 }
 
+// Sempre liberados: git (o harness commita checkpoints), e builtins que não leem nem gravam
+// arquivo — o redirecionamento já foi barrado em shellSegments.
+const ALWAYS_ALLOWED = ["git", "cd", "echo", "pwd", "true", "false"];
+
 function segmentAllowed(part: string, allowlist: string[]): boolean {
-  if (part === "git" || part.startsWith("git ") || part === "cd" || part.startsWith("cd ")) return true;
+  if (ALWAYS_ALLOWED.some((cmd) => part === cmd || part.startsWith(cmd + " "))) return true;
   if (ENGINE_COMMAND.test(part)) return true;
   return allowlist.some((entry) => part === entry || part.startsWith(entry));
 }

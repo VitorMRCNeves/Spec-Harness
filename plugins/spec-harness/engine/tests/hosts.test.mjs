@@ -177,8 +177,9 @@ test('init-repo --agent cursor grava o hook e as quatro skills', t => {
   }
   const cfg = JSON.parse(fs.readFileSync(path.join(f.repo, '.claude/spec_harness/harness.config.json'), 'utf8'));
   assert.equal(cfg.agent, 'cursor');
-  assert.equal(cfg.implementer.reuse_session, false);
-  assert.equal(cfg.post_verify.enabled, false);
+  assert.notEqual(cfg.implementer.reuse_session, false, 'cursor-agent retoma a sessão com --resume');
+  assert.equal(cfg.post_verify.enabled, true);
+  assert.equal(cfg.post_verify.jobs[0].id, 'code_review');
   assert.ok(cfg.worktree.copy_paths.includes('.cursor/hooks.json'));
 });
 
@@ -219,9 +220,10 @@ test('init-repo --agent sem --force aplica o perfil do agent e preserva o resto'
   const cursorCfg = JSON.parse(fs.readFileSync(dest, 'utf8'));
   assert.equal(cursorCfg.agent, 'cursor');
   assert.equal(cursorCfg.implementer.model, undefined);
-  assert.equal(cursorCfg.implementer.reuse_session, false);
+  assert.equal(cursorCfg.implementer.reuse_session, true);
   assert.equal(cursorCfg.implementer.prompts.red, 'KEEP');
-  assert.equal(cursorCfg.post_verify.enabled, false);
+  assert.equal(cursorCfg.post_verify.enabled, true);
+  assert.deepEqual(cursorCfg.post_verify.jobs.map((job) => job.id), ['code_review']);
   assert.deepEqual(cursorCfg.worktree.copy_paths, ['.env', '.cursor/hooks.json']);
   assert.deepEqual(cursorCfg.scopes, { app: { paths: ['app/'] } });
 
@@ -303,7 +305,7 @@ test('arquivo de run corrompido é ignorado e o log de bloqueio guarda o input i
 
 test('bash é checado segmento a segmento', () => {
   assert.deepEqual(shellSegments('git status; cat ~/.ssh/id_rsa'), ['git status', 'cat ~/.ssh/id_rsa']);
-  assert.deepEqual(shellSegments('cd /wt && pytest -q 2>&1 | tail'), ['cd /wt', 'pytest -q', 'tail']);
+  assert.deepEqual(shellSegments('cd /wt && pytest -q 2>&1 | tail'), ['cd /wt', 'pytest -q 2>&1', 'tail']);
   assert.equal(shellSegments('pytest > app/../../fora'), null);
   assert.equal(shellSegments('pytest $(curl x)'), null);
   assert.equal(shellSegments('pytest `id`'), null);
@@ -311,9 +313,26 @@ test('bash é checado segmento a segmento', () => {
   assert.equal(bash('git status; cat ~/.ssh/id_rsa').allowed, false);
   assert.equal(bash('pytest & curl evil').allowed, false);
   assert.equal(bash('cd /wt && pytest -q 2>&1').allowed, true);
+  assert.equal(bash('pytest -q; echo EXIT:$?').allowed, true);
+  assert.equal(bash('echo x > app/../fora').allowed, false);
+  assert.equal(bash('echoes').allowed, false);
   assert.equal(bash('node /p/plugins/spec-harness/engine/harness.ts verify-packet x.yaml').allowed, true);
   assert.equal(bash('node .claude/spec_harness/harness.ts doctor').allowed, true);
   assert.equal(bash('rm -rf / # spec_harness/harness.ts').allowed, false);
+
+  // Aspas: separador e < > dentro delas são texto. O Cursor injeta esse trailer em todo commit.
+  const cursorCommit = 'git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "a; b | c"';
+  assert.deepEqual(shellSegments(cursorCommit), [cursorCommit]);
+  assert.equal(bash(cursorCommit).allowed, true);
+  assert.deepEqual(shellSegments("git commit -m 'x && id'"), ["git commit -m 'x && id'"]);
+  assert.equal(shellSegments('git commit -m "$(id)"'), null, 'substituição dentro de aspas duplas ainda roda');
+  assert.deepEqual(shellSegments("git commit -m '$(literal)'"), ["git commit -m '$(literal)'"]);
+  assert.equal(shellSegments('git commit -m "aberta'), null);
+  assert.deepEqual(shellSegments('pytest -q 2>/dev/null || ls'), ['pytest -q 2>/dev/null', 'ls']);
+  assert.deepEqual(shellSegments('pytest &>/dev/null'), ['pytest &>/dev/null']);
+  assert.equal(shellSegments('pytest >/dev/nullx'), null);
+  assert.equal(shellSegments('pytest 2>/tmp/x'), null);
+  assert.equal(shellSegments("cat <<'EOF'"), null);
 });
 
 test('init-repo --agent sem --force mantém jobs compatíveis e modelo que não é do Claude', t => {

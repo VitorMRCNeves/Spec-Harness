@@ -35,6 +35,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { runCodex } from "./codex-runner.ts";
 import { runAntigravity } from "./agy-runner.ts";
+import { runCursor } from "./cursor-runner.ts";
 import {
   decide,
   detectHost,
@@ -1536,22 +1537,17 @@ function runClaudeJob(
       die(`job ${job.id}: ${agentProvider()} não traduz plugin_dirs/add_dirs do Claude; configure um prompt autocontido.`);
     }
     const prompt = interpolate(job.prompt, vars);
-    const run = agentProvider() === "codex"
-      ? runCodex({ cwd: REPO_ROOT, prompt, logPath, model: cfg.model, timeout_ms: cfg.timeout_ms }).then((code) => ({ code }))
-      : runAntigravity({
-          cwd: REPO_ROOT,
-          prompt,
-          logPath,
-          model: cfg.model,
-          timeout_ms: cfg.timeout_ms,
-          skip_permissions: implementerConfig().skip_permissions === true,
-        });
+    const common = { cwd: REPO_ROOT, prompt, logPath, model: cfg.model, timeout_ms: cfg.timeout_ms };
+    const skip_permissions = implementerConfig().skip_permissions === true;
+    const run =
+      agentProvider() === "codex"
+        ? runCodex(common).then((code) => ({ code }))
+        : agentProvider() === "cursor"
+          ? runCursor({ ...common, skip_permissions })
+          : runAntigravity({ ...common, skip_permissions });
     return run.then((result) => ({
       id: job.id, returncode: result.code, log: logPath, artifacts_dir: vars.out, blocking_findings: 0,
     }));
-  }
-  if (agentProvider() === "cursor") {
-    die(`job ${job.id}: Cursor não executa revisão headless. Rode a revisão na sessão e grave {out}/code-review.json.`);
   }
   const args = [
     "-p",
@@ -2440,7 +2436,7 @@ interface HostProfile {
 const HOSTS: Record<AgentName, HostProfile> = {
   claude: { cli: "claude", reuseSession: true, selfContainedJobs: false, hookFile: ".claude/settings.json" },
   codex: { cli: "codex", reuseSession: false, selfContainedJobs: true, hookFile: null },
-  cursor: { cli: null, reuseSession: false, selfContainedJobs: false, hookFile: ".cursor/hooks.json" },
+  cursor: { cli: "cursor-agent", reuseSession: true, selfContainedJobs: true, hookFile: ".cursor/hooks.json" },
   antigravity: { cli: "agy", reuseSession: true, selfContainedJobs: true, hookFile: ".agents/hooks.json" },
 };
 
@@ -2637,9 +2633,21 @@ async function runImplementer(
   }
 
   if (agentProvider() === "cursor") {
-    die(
-      "Cursor não executa autorun headless. Implemente a fase nesta sessão, dentro do worktree, e rode verify-packet."
-    );
+    console.log("  Cursor: cursor-agent -p no worktree; o .cursor/hooks.json copiado segura o path.");
+    const result = await runCursor({
+      cwd: run.worktree,
+      prompt,
+      logPath,
+      model: cfg.model,
+      timeout_ms: cfg.timeout_ms,
+      sessionId: retomando ? run.session_id : undefined,
+      skip_permissions: cfg.skip_permissions === true,
+    });
+    if (result.sessionId && result.sessionId !== run.session_id) {
+      run.session_id = result.sessionId;
+      saveRun(run);
+    }
+    return result.code;
   }
 
   if (agentProvider() === "antigravity") {
@@ -3228,11 +3236,6 @@ function applyAgentProfile(perfil: PerfilJson, selectedAgent: string, fresh: boo
   }
 
   const pv = (perfil.post_verify ?? {}) as Record<string, unknown>;
-  if (selectedAgent === "cursor") {
-    perfil.post_verify = fresh ? { enabled: false, gate: "warn", jobs: [] } : { ...pv, enabled: false };
-    if (pv.enabled !== false) changes.push("post_verify.enabled: false (Cursor não roda revisão headless)");
-    return changes;
-  }
   const jobs = (fresh ? [] : ((pv.jobs ?? []) as PostVerifyJob[])).filter(
     (job) => !job.plugin_dirs?.length && !job.add_dirs?.length
   );
@@ -3394,6 +3397,7 @@ function cmdInitRepo(args: string[]): void {
   } else if (selectedAgent === "cursor") {
     console.log(`Hook Cursor: ${ensureCursorHooks()} em .cursor/hooks.json`);
     installCursorSkills();
+    console.log("O autorun spawna cursor-agent -p no worktree; a sessão do editor também pode implementar a fase.");
   } else if (selectedAgent === "antigravity") {
     console.log(`Hook Antigravity: ${ensureAntigravityHooks()} em .agents/hooks.json`);
     console.log("O plugin (agy plugins install) repete esse hook e publica as skills. Os dois gates decidem igual.");
@@ -3575,7 +3579,17 @@ function diagnostico(): Problema[] {
       const skill = path.join(REPO_ROOT, ".cursor", "skills", name);
       if (!fs.existsSync(skill)) add("ERRO", "skills", `skill ausente: .cursor/skills/${name}`);
     }
-    add("AVISO", "autorun", "Cursor não spawna autorun headless; a sessão do editor implementa e o motor verifica.");
+    if (!temBinario("cursor-agent")) {
+      add("ERRO", "agent", "CLI cursor-agent não está no PATH — o autorun e o post_verify spawnam `cursor-agent -p`.");
+    }
+    if (implementerConfig().skip_permissions !== true) {
+      add(
+        "AVISO",
+        "implementer.skip_permissions",
+        "sem --force o cursor-agent -p pode recusar shell sem aprovação, conforme a config do Cursor. " +
+          "O hook failClosed continua negando o que está fora do packet se você ligar."
+      );
+    }
   } else if (agent === "antigravity") {
     const workspaceHooks = path.join(REPO_ROOT, ".agents", "hooks.json");
     const pluginHooks = [

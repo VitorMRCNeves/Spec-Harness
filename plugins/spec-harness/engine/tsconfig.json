@@ -20,6 +20,8 @@
     "harness.ts",
     "codex-runner.ts",
     "hook-decision.ts",
-    "agy-runner.ts"
+    "agy-runner.ts",
+    "cursor-runner.ts",
+    "headless.ts"
   ]
 }

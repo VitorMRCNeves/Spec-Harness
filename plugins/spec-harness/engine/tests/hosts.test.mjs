@@ -316,6 +316,10 @@ test('bash é checado segmento a segmento', () => {
   assert.equal(bash('pytest -q; echo EXIT:$?').allowed, true);
   assert.equal(bash('echo x > app/../fora').allowed, false);
   assert.equal(bash('echoes').allowed, false);
+  assert.equal(bash('pytestevil').allowed, false);
+  assert.equal(bash('pytest-curl evil').allowed, false);
+  assert.equal(bash('pytest\t-q').allowed, true);
+  assert.equal(bash('git\tstatus').allowed, true);
   assert.equal(bash('node /p/plugins/spec-harness/engine/harness.ts verify-packet x.yaml').allowed, true);
   assert.equal(bash('node .claude/spec_harness/harness.ts doctor').allowed, true);
   assert.equal(bash('rm -rf / # spec_harness/harness.ts').allowed, false);

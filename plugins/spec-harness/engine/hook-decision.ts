@@ -277,10 +277,12 @@ function gitAllowed(part: string): boolean {
 }
 
 function segmentAllowed(part: string, allowlist: string[]): boolean {
-  if (ALWAYS_ALLOWED.some((cmd) => part === cmd || part.startsWith(cmd + " "))) return true;
-  if (part === "git" || part.startsWith("git ")) return gitAllowed(part);
+  const commandPrefix = (entry: string): boolean =>
+    part === entry || (part.startsWith(entry) && /\s/.test(part[entry.length] ?? ""));
+  if (ALWAYS_ALLOWED.some(commandPrefix)) return true;
+  if (/^git(?:\s|$)/.test(part)) return gitAllowed(part);
   if (ENGINE_COMMAND.test(part)) return true;
-  return allowlist.some((entry) => part === entry || part.startsWith(entry));
+  return allowlist.some(commandPrefix);
 }
 
 // Instrução do repositório na raiz do worktree: todo host lê antes de trabalhar, e o prompt da

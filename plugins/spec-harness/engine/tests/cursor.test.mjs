@@ -124,6 +124,10 @@ test('RED e GREEN retomam a sessão; a revisão roda no cursor-agent sem --force
   assert.equal(calls[0].args[calls[0].args.indexOf('--workspace') + 1], calls[0].cwd);
   assert.equal(calls.every((call) => !call.args.includes('--force')), true);
   assert.notEqual(calls[0].cwd, f.repo);
+  // Coautoria do host: no commit que o harness faz e na instrução de checkpoint do GREEN.
+  const log = execFileSync('git', ['log', 'spec/smoke/01', '--format=%B'], { cwd: f.repo, encoding: 'utf8' });
+  assert.match(log, /Co-authored-by: Cursor Agent <cursoragent@cursor\.com>/);
+  assert.match(calls[1].prompt, /-m "Co-authored-by: Cursor Agent <cursoragent@cursor\.com>"/);
 });
 
 test('stdout vazio com exit 0 não aprova a fase', t => {

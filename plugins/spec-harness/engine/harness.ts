@@ -1075,7 +1075,8 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
   if (changed.length) {
     spawnSync("git", ["-C", worktree, "add", ...changed]);
     const commitMsg = `spec(${run.key}): ${packet.phase} gates ok — ${packet.packet_id}`;
-    const r = spawnSync("git", ["-C", worktree, "commit", "-m", commitMsg]);
+    const trailer = coauthorTrailer();
+    const r = spawnSync("git", ["-C", worktree, "commit", "-m", commitMsg, ...(trailer ? ["-m", trailer] : [])]);
     // Com checkpoints ligados o GREEN pode já ter commitado tudo: aí não há o que commitar, e
     // anunciar um commit que não existe é pior que não anunciar nada.
     if (!quiet) {
@@ -2431,14 +2432,35 @@ interface HostProfile {
   reuseSession: boolean; // retoma a sessão da fase anterior (implementer.prompts.retomada)
   selfContainedJobs: boolean; // post_verify sem plugin_dirs/add_dirs do Claude; exit != 0 reprova a fase
   hookFile: string | null; // hook de projeto: o worktree nasce da branch e só o tem se for copiado
+  coauthor: string; // trailer Co-authored-by dos commits da fase: o avatar do host aparece no GitHub
 }
 
+// Os e-mails são os que cada CLI usa nos próprios commits e que o GitHub liga à conta do agente.
 const HOSTS: Record<AgentName, HostProfile> = {
-  claude: { cli: "claude", reuseSession: true, selfContainedJobs: false, hookFile: ".claude/settings.json" },
-  codex: { cli: "codex", reuseSession: false, selfContainedJobs: true, hookFile: null },
-  cursor: { cli: "cursor-agent", reuseSession: true, selfContainedJobs: true, hookFile: ".cursor/hooks.json" },
-  antigravity: { cli: "agy", reuseSession: true, selfContainedJobs: true, hookFile: ".agents/hooks.json" },
+  claude: {
+    cli: "claude", reuseSession: true, selfContainedJobs: false, hookFile: ".claude/settings.json",
+    coauthor: "Claude <noreply@anthropic.com>",
+  },
+  codex: {
+    cli: "codex", reuseSession: false, selfContainedJobs: true, hookFile: null,
+    coauthor: "Codex <noreply@openai.com>",
+  },
+  cursor: {
+    cli: "cursor-agent", reuseSession: true, selfContainedJobs: true, hookFile: ".cursor/hooks.json",
+    coauthor: "Cursor Agent <cursoragent@cursor.com>",
+  },
+  antigravity: {
+    cli: "agy", reuseSession: true, selfContainedJobs: true, hookFile: ".agents/hooks.json",
+    coauthor: "Antigravity <antigravity-commits@google.com>",
+  },
 };
+
+// implementer.coauthor sobrepõe o do host; "" desliga o trailer.
+function coauthorTrailer(): string | null {
+  const configured = implementerConfig().coauthor;
+  const value = configured ?? HOSTS[agentProvider()].coauthor;
+  return value ? `Co-authored-by: ${value}` : null;
+}
 
 function isAgentName(value: string): value is AgentName {
   return Object.hasOwn(HOSTS, value);
@@ -2470,6 +2492,7 @@ interface ImplementerConfig {
   reuse_session?: boolean;
   system_prompt?: string;
   skip_permissions?: boolean;
+  coauthor?: string;
 }
 
 function implementerConfig(): ImplementerConfig {
@@ -2555,12 +2578,15 @@ function leanSettingsJson(): string {
 function blocoDeCheckpoints(phase: Phase, key: string, testCommand: string): string {
   if (phase !== "green") return "";
   if (implementerConfig().green_checkpoints === false) return "";
+  const trailer = coauthorTrailer();
   return (
     "\n\nCHECKPOINTS DESTA FASE — isto sobrepõe a instrução \"não commite\" acima, e só ela.\n\n" +
     "Trabalhe um caso de teste por vez, na ordem da tabela `Casos de Teste Mínimos` da spec. " +
     `Assim que \`${testCommand}\` passar por causa do T-xx em que você está, commite só ele:\n` +
     "  git add <apenas os arquivos de produção que VOCÊ editou>\n" +
-    `  git commit -m "spec(${key}): checkpoint T-xx — <o comportamento que passou a valer>"\n\n` +
+    `  git commit -m "spec(${key}): checkpoint T-xx — <o comportamento que passou a valer>"` +
+    (trailer ? ` -m "${trailer}"` : "") +
+    "\n\n" +
     "Limites, sem exceção: nunca `git add -A` nem `git add .`; nunca adicione arquivo de teste " +
     "(ele é o contrato do RED); nada de branch, rebase, reset, revert, amend, stash, push ou " +
     "qualquer coisa que reescreva histórico. Você só acrescenta commits nesta branch.\n" +

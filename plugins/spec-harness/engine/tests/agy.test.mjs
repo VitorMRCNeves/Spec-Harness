@@ -34,6 +34,7 @@ function fixture(t, mode = 'pass') {
         retomada: 'PHASE {phase} {write_paths}',
       },
       reuse_session: true,
+      coauthor: 'Fulana Revisora <fulana@example.test>',
     },
     crap: { enabled: false },
     post_verify: { enabled: true, gate: 'block', jobs: [{ id: 'code_review', prompt: 'REVIEW {out}' }] },
@@ -128,6 +129,10 @@ test('RED e GREEN retomam a conversa; a revisão não pede skip de permissão', 
   assert.notEqual(calls[0].cwd, f.repo);
   assert.equal(calls[0].args[calls[0].args.indexOf('--add-dir') + 1], calls[0].cwd);
   assert.equal(fs.readFileSync(path.join(f.repo, 'app/value.mjs'), 'utf8'), 'export const value = 1;\n');
+  // implementer.coauthor sobrepõe o coautor padrão do host.
+  const log = execFileSync('git', ['log', 'spec/smoke/01', '--format=%B'], { cwd: f.repo, encoding: 'utf8' });
+  assert.match(log, /Co-authored-by: Fulana Revisora <fulana@example\.test>/);
+  assert.doesNotMatch(log, /antigravity-commits/);
 });
 
 test('stdout vazio com exit 0 não aprova a fase', t => {

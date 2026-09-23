@@ -377,3 +377,27 @@ test('hook-check funciona com cwd fora de um repo git (hook de plugin da agy)', 
   assert.equal(allowed.status, 0, allowed.stderr);
   assert.deepEqual(JSON.parse(allowed.stdout), { decision: 'allow' });
 });
+
+test('git só por subcomando permitido e sem opção que executa programa', () => {
+  const bash = (command) => decide(normalizeCall('claude', { tool_name: 'Bash', tool_input: { command } }, '/wt'), caps);
+  for (const ok of [
+    'git status', 'git -C /wt log --oneline -3', 'git --no-pager diff', 'git show HEAD',
+    'git add app/x.py && git commit -m "spec: checkpoint" -m "Co-authored-by: Codex <noreply@openai.com>"',
+  ]) assert.equal(bash(ok).allowed, true, ok);
+  for (const no of [
+    "git -c alias.x='!sh -c id' x", 'git -c core.pager=id log', 'git config alias.x "!id"',
+    'git restore secrets.txt', 'git checkout -- secrets.txt', 'git rm secrets.txt', 'git clean -fd',
+    'git grep -O id foo', 'git diff --ext-diff', 'git --exec-path=/tmp log', 'git reset --hard', 'git push',
+  ]) assert.equal(bash(no).allowed, false, no);
+});
+
+test('AGENTS.md, CLAUDE.md e GEMINI.md na raiz são legíveis; só leitura e só na raiz', () => {
+  // decide recebe o path já relativo ao worktree (scopePath no harness).
+  const call = (tool, file_path) => decide(
+    { ...normalizeCall('claude', { tool_name: tool, tool_input: { file_path } }, '/wt'), path: file_path },
+    caps,
+  );
+  for (const file of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']) assert.equal(call('Read', file).allowed, true, file);
+  assert.equal(call('Read', 'docs/AGENTS.md').allowed, false);
+  assert.equal(call('Write', 'AGENTS.md').allowed, false);
+});

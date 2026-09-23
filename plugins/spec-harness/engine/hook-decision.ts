@@ -251,19 +251,45 @@ export function shellSegments(command: string): string[] | null {
   return segments.map((part) => part.trim()).filter(Boolean);
 }
 
-// Sempre liberados: git (o harness commita checkpoints), e builtins que não leem nem gravam
-// arquivo — o redirecionamento já foi barrado em shellSegments.
-const ALWAYS_ALLOWED = ["git", "cd", "echo", "pwd", "true", "false"];
+// Sempre liberados: builtins que não leem nem gravam arquivo — o redirecionamento já foi barrado
+// em shellSegments. git tem regra própria (gitAllowed).
+const ALWAYS_ALLOWED = ["cd", "echo", "pwd", "true", "false"];
+
+// git entra por subcomando, não por prefixo: `git -c alias.x='!sh' x` roda qualquer coisa, e
+// restore/checkout/rm/mv/clean mexem na árvore por fora dos globs de escrita. Fica o que lê e o
+// add/commit dos checkpoints do GREEN (hooks em .git/ estão fora de qualquer glob de escrita).
+const GIT_SUBCOMMANDS = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "grep", "add", "commit"]);
+// Opções que executam programa ou trocam a config em tempo de execução.
+const GIT_EXEC_OPTION = /(^|\s)(-c|--config-env|--exec-path|-O|--open-files-in-pager|--ext-diff|--textconv|--upload-pack|--receive-pack)(\s|=|$)/;
+
+function gitAllowed(part: string): boolean {
+  const words = part.split(/\s+/);
+  if (words[0] !== "git") return false;
+  if (GIT_EXEC_OPTION.test(part)) return false;
+  let i = 1;
+  // Opções globais aceitas antes do subcomando; qualquer outra recusa.
+  while (i < words.length && words[i].startsWith("-")) {
+    if (words[i] === "-C") i += 2;
+    else if (words[i] === "--no-pager") i += 1;
+    else return false;
+  }
+  return GIT_SUBCOMMANDS.has(words[i] ?? "");
+}
 
 function segmentAllowed(part: string, allowlist: string[]): boolean {
   if (ALWAYS_ALLOWED.some((cmd) => part === cmd || part.startsWith(cmd + " "))) return true;
+  if (part === "git" || part.startsWith("git ")) return gitAllowed(part);
   if (ENGINE_COMMAND.test(part)) return true;
   return allowlist.some((entry) => part === entry || part.startsWith(entry));
 }
 
+// Instrução do repositório na raiz do worktree: todo host lê antes de trabalhar, e o prompt da
+// fase manda seguir o AGENTS.md. Só leitura, e só na raiz.
+const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"];
+
 export function decide(call: NormalizedCall, caps: Capabilities): Decision {
   if (call.kind === "read") {
-    if (call.path && !matchesAny(call.path, [...caps.read, ...caps.write])) {
+    if (call.path && !INSTRUCTION_FILES.includes(call.path) && !matchesAny(call.path, [...caps.read, ...caps.write])) {
       return { allowed: false, reason: `path fora de capabilities.read.paths: ${call.path}` };
     }
     return { allowed: true, reason: "" };

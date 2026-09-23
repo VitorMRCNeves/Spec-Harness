@@ -338,3 +338,23 @@ test('init-repo --agent sem --force mantém jobs compatíveis e modelo que não 
   assert.deepEqual(cfg.post_verify.jobs, jobs);
   assert.match(result.stdout, /agent: claude → antigravity/);
 });
+
+test('hook-check funciona com cwd fora de um repo git (hook de plugin da agy)', t => {
+  const f = gitRepo(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-nogit-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const run = (file) => spawnSync(guard, [], {
+    cwd: outside,
+    env: { ...f.env, SPEC_HARNESS_HOOK_HOST: 'antigravity' },
+    input: JSON.stringify({
+      toolCall: { name: 'write_to_file', args: { TargetFile: path.join(f.repo, file), CodeContent: 'x' } },
+    }),
+    encoding: 'utf8',
+  });
+  const denied = run('secrets.txt');
+  assert.equal(denied.status, 0, denied.stderr);
+  assert.equal(JSON.parse(denied.stdout).decision, 'deny');
+  const allowed = run('app/ok.txt');
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.deepEqual(JSON.parse(allowed.stdout), { decision: 'allow' });
+});

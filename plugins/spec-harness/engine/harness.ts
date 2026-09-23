@@ -74,9 +74,20 @@ const USAGE = `Subcomandos:
     discard-spec-worktree <worktree_path> [--delete-branch]
     hook-check                       (uso interno — chamado pelo hook PreToolUse)`;
 
-const REPO_ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-  encoding: "utf-8",
-}).trim();
+// hook-check roda com o cwd que o host escolher — a agy chama hooks de plugin fora de qualquer
+// repo, e um crash aqui vira deny de toda ferramenta durante a run. Ele só lê o estado das runs;
+// os demais subcomandos continuam exigindo um repositório git.
+const REPO_ROOT = (() => {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (error) {
+    if (process.argv[2] === "hook-check") return process.cwd();
+    throw error;
+  }
+})();
 
 // O motor pode estar instalado global (~/.claude/spec_harness) ou dentro do repo. Tudo que é
 // caminho de ferramenta ou de template resolve contra HARNESS_DIR; só a config é do repo.
@@ -2762,7 +2773,7 @@ async function cmdAutorun(args: string[]): Promise<void> {
         console.log(
           retomou
             ? `[${phase}] sessão retomada (${run.session_id}) — spec e orientação já no contexto`
-            : `[${phase}] sessão nova (${run.session_id})`
+            : run.session_id ? `[${phase}] sessão nova (${run.session_id})` : `[${phase}] sessão nova`
         );
       }
       const outcome = await verifyPacket(packetPath, true);

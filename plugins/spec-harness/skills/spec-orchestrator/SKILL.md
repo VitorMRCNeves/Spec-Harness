@@ -6,6 +6,10 @@ allowed-tools: [Read, Glob, Grep, Bash, Edit, Agent]
 
 # Spec Orchestrator (lean)
 
+## Host
+
+Se o agente atual for Cursor, leia `../../CURSOR.md`. Se for a Antigravity CLI, leia `../../ANTIGRAVITY.md`. Nomes como `Agent` e `Bash` neste documento são papéis do Claude; use a ferramenta nativa equivalente e preserve a ordem RED → GREEN.
+
 Alternativa ao `autorun` do `spec-harness` para quando o custo de token do motor (packet YAML,
 `PROJECT_MAP.md` completo por fase, `evidence.json`, retries, `code-review-skill` por spec) não
 compensa. Aqui não tem motor: o subagente lê a spec Markdown direto e implementa. O que se mantém

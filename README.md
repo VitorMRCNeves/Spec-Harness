@@ -58,6 +58,10 @@ O motor aceita `init-repo --agent codex`; as skills são `$sdd` e `$spec-harness
 O Codex executa RED/GREEN e revisão via `codex exec`, com auditoria de paths ao final da fase.
 As seções abaixo que citam `/plugin`, `claude`, sonnet e `PreToolUse` descrevem o provedor Claude.
 
+## Cursor e Antigravity CLI
+
+O mesmo motor aceita `init-repo --agent cursor` e `init-repo --agent antigravity`. As notas de host estão em [plugins/spec-harness/CURSOR.md](plugins/spec-harness/CURSOR.md) e [plugins/spec-harness/ANTIGRAVITY.md](plugins/spec-harness/ANTIGRAVITY.md). No Cursor o autorun spawna `cursor-agent -p` no worktree e o hook de projeto segura o path. Na Antigravity CLI o autorun spawna `agy -p`, e o plugin instala com `agy plugin install plugins/spec-harness`.
+
 ## Instalação
 
 ```

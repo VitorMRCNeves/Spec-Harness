@@ -7,7 +7,7 @@
  * Neste repositório o perfil é Python/FastAPI/LangGraph (ruff + pytest).
  *
  * Subcomandos:
- *   init-repo [--force] [--agent claude|codex]              (detecta o perfil do repo, cria a config e registra o hook)
+ *   init-repo [--force] [--agent claude|codex|cursor|antigravity] (detecta o perfil, cria a config e registra o hook)
  *   doctor [--json]                  (diagnóstico da config do repo: ERRO bloqueia, AVISO degrada)
  *   validate-spec <spec.md>
  *   validate-packet <packet.yaml>
@@ -34,6 +34,17 @@
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { runCodex } from "./codex-runner.ts";
+import { runAntigravity } from "./agy-runner.ts";
+import { runCursor } from "./cursor-runner.ts";
+import {
+  decide,
+  detectHost,
+  hookStdout,
+  matchesAny,
+  normalizeCall,
+  type Capabilities,
+  type HookHost,
+} from "./hook-decision.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -42,7 +53,8 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 const USAGE = `Subcomandos:
-    init-repo [--force] [--agent claude|codex]              (detecta o perfil do repo, escreve
+    init-repo [--force] [--agent claude|codex|cursor|antigravity]
+                                      (detecta o perfil do repo, escreve
                                       .claude/spec_harness/harness.config.json e registra o hook)
     doctor [--json]                  (diz o que falta configurar neste repo, campo a campo)
     validate-spec <spec.md>
@@ -63,9 +75,20 @@ const USAGE = `Subcomandos:
     discard-spec-worktree <worktree_path> [--delete-branch]
     hook-check                       (uso interno — chamado pelo hook PreToolUse)`;
 
-const REPO_ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-  encoding: "utf-8",
-}).trim();
+// hook-check roda com o cwd que o host escolher — a agy chama hooks de plugin fora de qualquer
+// repo, e um crash aqui vira deny de toda ferramenta durante a run. Ele só lê o estado das runs;
+// os demais subcomandos continuam exigindo um repositório git.
+const REPO_ROOT = (() => {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (error) {
+    if (process.argv[2] === "hook-check") return process.cwd();
+    throw error;
+  }
+})();
 
 // O motor pode estar instalado global (~/.claude/spec_harness) ou dentro do repo. Tudo que é
 // caminho de ferramenta ou de template resolve contra HARNESS_DIR; só a config é do repo.
@@ -477,43 +500,6 @@ function expandGlobs(root: string, patterns: string[]): string[] {
       return !isIgnored(rel) && fs.existsSync(abs) && fs.statSync(abs).isFile();
     })
     .sort();
-}
-
-// Traduz um padrão de glob para regex com a mesma semântica do `fnmatch` do Python
-// (usado pelo packet original): `*`/`**` casam qualquer sequência, `?` um caractere.
-function globToRegex(pattern: string): RegExp {
-  let re = "";
-  let i = 0;
-  const n = pattern.length;
-  while (i < n) {
-    const c = pattern[i++];
-    if (c === "*") {
-      re += ".*";
-    } else if (c === "?") {
-      re += ".";
-    } else if (c === "[") {
-      let j = i;
-      if (j < n && (pattern[j] === "!" || pattern[j] === "^")) j++;
-      if (j < n && pattern[j] === "]") j++;
-      while (j < n && pattern[j] !== "]") j++;
-      if (j >= n) {
-        re += "\\[";
-      } else {
-        let stuff = pattern.slice(i, j).replace(/\\/g, "\\\\");
-        i = j + 1;
-        if (stuff.startsWith("!")) stuff = "^" + stuff.slice(1);
-        else if (stuff.startsWith("^")) stuff = "\\" + stuff;
-        re += `[${stuff}]`;
-      }
-    } else {
-      re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    }
-  }
-  return new RegExp(`^${re}$`);
-}
-
-function matchesAny(relPath: string, patterns: string[]): boolean {
-  return patterns.some((p) => globToRegex(p).test(relPath));
 }
 
 function fingerprint(root: string, patterns: string[]): Record<string, string> {
@@ -1089,7 +1075,8 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
   if (changed.length) {
     spawnSync("git", ["-C", worktree, "add", ...changed]);
     const commitMsg = `spec(${run.key}): ${packet.phase} gates ok — ${packet.packet_id}`;
-    const r = spawnSync("git", ["-C", worktree, "commit", "-m", commitMsg]);
+    const trailer = coauthorTrailer();
+    const r = spawnSync("git", ["-C", worktree, "commit", "-m", commitMsg, ...(trailer ? ["-m", trailer] : [])]);
     // Com checkpoints ligados o GREEN pode já ter commitado tudo: aí não há o que commitar, e
     // anunciar um commit que não existe é pior que não anunciar nada.
     if (!quiet) {
@@ -1118,7 +1105,7 @@ async function verifyPacket(origArg: string, quiet = false): Promise<VerifyOutco
     if (postVerifyConfig().enabled) {
       const { results, errors: reviewErrors } = await runPostVerify(packet, run);
       extra.post_verify = {
-        model: postVerifyConfig().model ?? (agentProvider() === "codex" ? "Codex default" : "sonnet"),
+        model: postVerifyConfig().model ?? defaultModelLabel(),
         gate: postVerifyConfig().gate ?? "warn",
         review_dir: path.relative(REPO_ROOT, reviewDir),
         results,
@@ -1546,14 +1533,22 @@ function runClaudeJob(
   cfg: PostVerifyConfig,
   logPath: string
 ): Promise<PostVerifyResult> {
-  if (agentProvider() === "codex") {
+  if (host().selfContainedJobs) {
     if (job.plugin_dirs?.length || job.add_dirs?.length) {
-      die(`job ${job.id}: Codex não traduz plugin_dirs/add_dirs do Claude; configure um prompt autocontido.`);
+      die(`job ${job.id}: ${agentProvider()} não traduz plugin_dirs/add_dirs do Claude; configure um prompt autocontido.`);
     }
-    return runCodex({ cwd: REPO_ROOT, prompt: interpolate(job.prompt, vars), logPath,
-      model: cfg.model, timeout_ms: cfg.timeout_ms }).then((code) => ({
-        id: job.id, returncode: code, log: logPath, artifacts_dir: vars.out, blocking_findings: 0,
-      }));
+    const prompt = interpolate(job.prompt, vars);
+    const common = { cwd: REPO_ROOT, prompt, logPath, model: cfg.model, timeout_ms: cfg.timeout_ms };
+    const skip_permissions = implementerConfig().skip_permissions === true;
+    const run =
+      agentProvider() === "codex"
+        ? runCodex(common).then((code) => ({ code }))
+        : agentProvider() === "cursor"
+          ? runCursor({ ...common, skip_permissions })
+          : runAntigravity({ ...common, skip_permissions });
+    return run.then((result) => ({
+      id: job.id, returncode: result.code, log: logPath, artifacts_dir: vars.out, blocking_findings: 0,
+    }));
   }
   const args = [
     "-p",
@@ -1668,7 +1663,7 @@ async function runPostVerify(
   };
 
   console.log(
-    `\nRevisão automática pós-VERIFY (${cfg.model ?? (agentProvider() === "codex" ? "Codex default" : "sonnet")}, ${jobs.length} agentes em paralelo): ` +
+    `\nRevisão automática pós-VERIFY (${cfg.model ?? defaultModelLabel()}, ${jobs.length} agentes em paralelo): ` +
       `${jobs.map((j) => j.id).join(", ")}`
   );
   console.log(`  diff revisado: git diff ${base}...${run.branch}`);
@@ -1999,87 +1994,74 @@ function cmdDiscardSpecWorktree(args: string[]): void {
 
 // --------------------------------------------------------------------------- hook-check
 
-function targetPath(input: Record<string, unknown>, worktree: string): string | null {
-  for (const k of ["file_path", "path", "notebook_path"]) {
-    const val = input[k];
-    if (typeof val === "string") return isWithin(val, worktree) ? path.relative(worktree, val) : val;
+function scopePath(value: string | null, worktree: string): string | null {
+  if (!value) return null;
+  return isWithin(value, worktree) ? path.relative(worktree, value) : value;
+}
+
+// Um arquivo de run corrompido não pode derrubar o hook: no Claude o crash libera a ferramenta e
+// no Cursor (failClosed) bloqueia tudo, inclusive fora do worktree.
+function loadRuns(): RunState[] {
+  if (!fs.existsSync(RUNS_DIR)) return [];
+  const runs: RunState[] = [];
+  for (const f of fs.readdirSync(RUNS_DIR).filter((name) => name.endsWith(".json"))) {
+    try {
+      runs.push(JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), "utf-8")) as RunState);
+    } catch {
+      // ignorado: sem worktree legível não há o que escopar
+    }
   }
-  return null;
+  return runs;
 }
 
 function findRunForCwd(cwd: string): RunState | null {
-  if (!fs.existsSync(RUNS_DIR)) return null;
-  for (const f of fs.readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json"))) {
-    const candidate = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), "utf-8")) as RunState;
-    if (cwd === candidate.worktree || isWithin(cwd, candidate.worktree)) return candidate;
-  }
-  return null;
+  return loadRuns().find((run) => run.worktree && isWithin(cwd, run.worktree)) ?? null;
 }
 
-interface HookPayload {
-  tool_name?: string;
-  tool_input?: Record<string, unknown>;
-  cwd?: string;
+function findRunForPath(absPath: string | null): RunState | null {
+  if (!absPath || !path.isAbsolute(absPath)) return null;
+  return loadRuns().find((run) => run.worktree && isWithin(absPath, run.worktree)) ?? null;
 }
 
-// Entry point do hook PreToolUse. Lê JSON do stdin, decide allow/block.
-// No-op (allow) fora de um worktree com execução ativa do spec-harness — não afeta o
-// uso normal do Claude Code neste repositório.
+function finishHook(host: HookHost, allowed: boolean, reason: string): never {
+  const response = hookStdout(host, { allowed, reason });
+  if (response.body) console.log(response.body);
+  if (!allowed && host === "claude") console.error(reason);
+  process.exit(response.code);
+}
+
+// Entry point do hook. Lê JSON do stdin, decide allow/block.
+// No-op (allow) fora de um worktree com execução ativa — não afeta o uso normal do host.
 function cmdHookCheck(): void {
-  let payload: HookPayload = {};
+  const host = detectHost({}, process.env.SPEC_HARNESS_HOOK_HOST);
+  let payload: Record<string, unknown> = {};
   try {
-    payload = JSON.parse(fs.readFileSync(0, "utf-8") || "{}");
+    payload = JSON.parse(fs.readFileSync(0, "utf-8") || "{}") as Record<string, unknown>;
   } catch {
-    process.exit(0); // payload inesperado — não bloqueia por segurança de regressão
+    finishHook(host, true, ""); // payload inesperado — não bloqueia por segurança de regressão
   }
 
-  const toolName = payload.tool_name ?? "";
-  const toolInput = payload.tool_input ?? {};
-  const cwd = payload.cwd ?? process.cwd();
+  const resolvedHost = detectHost(payload, process.env.SPEC_HARNESS_HOOK_HOST);
+  const call = normalizeCall(resolvedHost, payload, process.cwd());
+  const run = findRunForCwd(call.cwd) ?? findRunForPath(call.path);
+  if (!run) finishHook(resolvedHost, true, "");
 
-  const run = findRunForCwd(cwd);
-  if (!run) process.exit(0);
-
-  const caps = run.capabilities ?? { read: [], write: [], bash: [] };
-  let allowed = true;
-  let reason = "";
-
-  if (["Read", "Glob", "Grep", "NotebookEdit"].includes(toolName)) {
-    const p = targetPath(toolInput, run.worktree);
-    if (p && !matchesAny(p, [...caps.read, ...caps.write])) {
-      allowed = false;
-      reason = `path fora de capabilities.read.paths: ${p}`;
-    }
-  } else if (["Write", "Edit"].includes(toolName)) {
-    const p = targetPath(toolInput, run.worktree);
-    if (p && !matchesAny(p, caps.write)) {
-      allowed = false;
-      reason = `path fora de capabilities.write.paths: ${p}`;
-    }
-  } else if (toolName === "Bash") {
-    const command = (toolInput.command as string) ?? "";
-    if (command.includes("spec_harness/harness.ts") || command.startsWith("git ")) {
-      allowed = true;
-    } else if (!caps.bash.some((c) => command === c || command.startsWith(c))) {
-      allowed = false;
-      reason = `comando fora de capabilities.bash.commands: ${command}`;
-    }
-  } else {
-    allowed = false;
-    reason = `ferramenta '${toolName}' sem regra declarada no packet — bloqueada por padrão`;
-  }
-
-  if (allowed) process.exit(0);
+  const caps: Capabilities = run.capabilities ?? { read: [], write: [], bash: [] };
+  const decision = decide({ ...call, path: scopePath(call.path, run.worktree) }, caps);
+  if (decision.allowed) finishHook(resolvedHost, true, "");
 
   fs.mkdirSync(BLOCKED_DIR, { recursive: true });
   fs.appendFileSync(
     path.join(BLOCKED_DIR, `${run.run_id}.jsonl`),
-    JSON.stringify({ ts: Date.now() / 1000, tool_name: toolName, tool_input: toolInput, reason }) + "\n",
+    JSON.stringify({
+      ts: Date.now() / 1000,
+      tool_name: call.tool,
+      tool_input: call.input,
+      reason: decision.reason,
+    }) + "\n",
     "utf-8"
   );
-
-  console.error(reason);
-  process.exit(2);
+  finishHook(resolvedHost, false, decision.reason);
 }
 
 // --------------------------------------------------------------------------- packet unificado
@@ -2443,10 +2425,59 @@ function cmdScaffoldPacket(args: string[]): void {
 
 // --------------------------------------------------------------------------- autorun
 
-function agentProvider(): "claude" | "codex" {
+type AgentName = "claude" | "codex" | "cursor" | "antigravity";
+
+interface HostProfile {
+  cli: string | null; // binário spawnado no autorun e no post_verify; null = sem modo headless
+  reuseSession: boolean; // retoma a sessão da fase anterior (implementer.prompts.retomada)
+  selfContainedJobs: boolean; // post_verify sem plugin_dirs/add_dirs do Claude; exit != 0 reprova a fase
+  hookFile: string | null; // hook de projeto: o worktree nasce da branch e só o tem se for copiado
+  coauthor: string; // trailer Co-authored-by dos commits da fase: o avatar do host aparece no GitHub
+}
+
+// Os e-mails são os que cada CLI usa nos próprios commits e que o GitHub liga à conta do agente.
+const HOSTS: Record<AgentName, HostProfile> = {
+  claude: {
+    cli: "claude", reuseSession: true, selfContainedJobs: false, hookFile: ".claude/settings.json",
+    coauthor: "Claude <noreply@anthropic.com>",
+  },
+  codex: {
+    cli: "codex", reuseSession: false, selfContainedJobs: true, hookFile: null,
+    coauthor: "Codex <noreply@openai.com>",
+  },
+  cursor: {
+    cli: "cursor-agent", reuseSession: true, selfContainedJobs: true, hookFile: ".cursor/hooks.json",
+    coauthor: "Cursor Agent <cursoragent@cursor.com>",
+  },
+  antigravity: {
+    cli: "agy", reuseSession: true, selfContainedJobs: true, hookFile: ".agents/hooks.json",
+    coauthor: "Antigravity <antigravity-commits@google.com>",
+  },
+};
+
+// implementer.coauthor sobrepõe o do host; "" desliga o trailer.
+function coauthorTrailer(): string | null {
+  const configured = implementerConfig().coauthor;
+  const value = configured ?? HOSTS[agentProvider()].coauthor;
+  return value ? `Co-authored-by: ${value}` : null;
+}
+
+function isAgentName(value: string): value is AgentName {
+  return Object.hasOwn(HOSTS, value);
+}
+
+function agentProvider(): AgentName {
   const value = process.env.SPEC_HARNESS_AGENT ?? CFG().agent ?? "claude";
-  if (value !== "claude" && value !== "codex") die(`agent inválido: ${value}`);
+  if (!isAgentName(value)) die(`agent inválido: ${value}`);
   return value;
+}
+
+function host(): HostProfile {
+  return HOSTS[agentProvider()];
+}
+
+function defaultModelLabel(): string {
+  return agentProvider() === "claude" ? "sonnet" : `${agentProvider()} default`;
 }
 
 interface ImplementerConfig {
@@ -2460,6 +2491,8 @@ interface ImplementerConfig {
   lean_context?: boolean;
   reuse_session?: boolean;
   system_prompt?: string;
+  skip_permissions?: boolean;
+  coauthor?: string;
 }
 
 function implementerConfig(): ImplementerConfig {
@@ -2545,12 +2578,15 @@ function leanSettingsJson(): string {
 function blocoDeCheckpoints(phase: Phase, key: string, testCommand: string): string {
   if (phase !== "green") return "";
   if (implementerConfig().green_checkpoints === false) return "";
+  const trailer = coauthorTrailer();
   return (
     "\n\nCHECKPOINTS DESTA FASE — isto sobrepõe a instrução \"não commite\" acima, e só ela.\n\n" +
     "Trabalhe um caso de teste por vez, na ordem da tabela `Casos de Teste Mínimos` da spec. " +
     `Assim que \`${testCommand}\` passar por causa do T-xx em que você está, commite só ele:\n` +
     "  git add <apenas os arquivos de produção que VOCÊ editou>\n" +
-    `  git commit -m "spec(${key}): checkpoint T-xx — <o comportamento que passou a valer>"\n\n` +
+    `  git commit -m "spec(${key}): checkpoint T-xx — <o comportamento que passou a valer>"` +
+    (trailer ? ` -m "${trailer}"` : "") +
+    "\n\n" +
     "Limites, sem exceção: nunca `git add -A` nem `git add .`; nunca adicione arquivo de teste " +
     "(ele é o contrato do RED); nada de branch, rebase, reset, revert, amend, stash, push ou " +
     "qualquer coisa que reescreva histórico. Você só acrescenta commits nesta branch.\n" +
@@ -2562,7 +2598,7 @@ function blocoDeCheckpoints(phase: Phase, key: string, testCommand: string): str
   );
 }
 
-function runImplementer(
+async function runImplementer(
   phase: Phase,
   packet: Packet,
   run: RunState,
@@ -2574,8 +2610,8 @@ function runImplementer(
   // sessão sem instrução de fase — inclusive sem a fronteira de escrita nova. Nesse caso o
   // reaproveitamento se desliga sozinho e o comportamento volta ao de antes: um upgrade do motor
   // não pode quebrar um repositório já configurado, nem afrouxar o enforcement em silêncio.
-  const reuse = agentProvider() === "claude" && cfg.reuse_session !== false && Boolean(cfg.prompts?.retomada);
-  if (agentProvider() === "claude" && cfg.reuse_session !== false && !cfg.prompts?.retomada) {
+  const reuse = host().reuseSession && cfg.reuse_session !== false && Boolean(cfg.prompts?.retomada);
+  if (host().reuseSession && cfg.reuse_session !== false && !cfg.prompts?.retomada) {
     console.log(
       `  AVISO: implementer.prompts.retomada ausente em ${path.relative(REPO_ROOT, CONFIG_PATH)} — ` +
         `cada fase abrirá sessão fria. Copie o prompt do template para reaproveitar a sessão.`
@@ -2620,6 +2656,42 @@ function runImplementer(
   if (agentProvider() === "codex") {
     console.log("  Codex: sandbox workspace-write; paths auditados ao final da fase, sem hook preventivo de leitura/escrita.");
     return runCodex({ cwd: run.worktree, prompt, logPath, model: cfg.model, timeout_ms: cfg.timeout_ms });
+  }
+
+  if (agentProvider() === "cursor") {
+    console.log("  Cursor: cursor-agent -p no worktree; o .cursor/hooks.json copiado segura o path.");
+    const result = await runCursor({
+      cwd: run.worktree,
+      prompt,
+      logPath,
+      model: cfg.model,
+      timeout_ms: cfg.timeout_ms,
+      sessionId: retomando ? run.session_id : undefined,
+      skip_permissions: cfg.skip_permissions === true,
+    });
+    if (result.sessionId && result.sessionId !== run.session_id) {
+      run.session_id = result.sessionId;
+      saveRun(run);
+    }
+    return result.code;
+  }
+
+  if (agentProvider() === "antigravity") {
+    console.log("  Antigravity: agy -p no worktree; o hook (.agents/hooks.json copiado ou o do plugin) segura o path.");
+    const result = await runAntigravity({
+      cwd: run.worktree,
+      prompt,
+      logPath,
+      model: cfg.model,
+      timeout_ms: cfg.timeout_ms,
+      conversationId: retomando ? run.session_id : undefined,
+      skip_permissions: cfg.skip_permissions === true,
+    });
+    if (result.conversationId && result.conversationId !== run.session_id) {
+      run.session_id = result.conversationId;
+      saveRun(run);
+    }
+    return result.code;
   }
 
   const args = [
@@ -2727,15 +2799,15 @@ async function cmdAutorun(args: string[]): Promise<void> {
       const t0 = Date.now();
       const retomou = usaImplementador && Boolean(run.session_id);
       const code = usaImplementador ? await runImplementer(phase, packet, run, feedback, logPath) : 0;
-      if (agentProvider() === "codex" && code !== 0) {
-        die(`Codex terminou com exit ${code} na fase ${phase}; nenhuma aprovação concedida. Veja ${logPath}`);
+      if (host().selfContainedJobs && code !== 0) {
+        die(`${agentProvider()} terminou com exit ${code} na fase ${phase}; nenhuma aprovação concedida. Veja ${logPath}`);
       }
       const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
       if (usaImplementador) {
         console.log(
           retomou
             ? `[${phase}] sessão retomada (${run.session_id}) — spec e orientação já no contexto`
-            : `[${phase}] sessão nova (${run.session_id})`
+            : run.session_id ? `[${phase}] sessão nova (${run.session_id})` : `[${phase}] sessão nova`
         );
       }
       const outcome = await verifyPacket(packetPath, true);
@@ -3146,11 +3218,169 @@ function aplicaDeteccao(perfil: PerfilJson, d: Deteccao): PerfilJson {
   return out;
 }
 
+const PLUGIN_SKILLS = ["sdd", "spec-harness", "spec-orchestrator", "qa-tester"];
+
+// Só eventos que bloqueiam. O Cursor não tem evento antes da escrita: ela é barrada no preToolUse.
+const CURSOR_HOOK_EVENTS = ["beforeReadFile", "beforeShellExecution", "preToolUse"];
+
+const REVIEW_PROMPT =
+  "Revise git diff {base}...{branch} para a spec {spec}. Leia AGENTS.md. Avalie bugs, contratos e testes. " +
+  'Grave {out}/code-review.json com {"findings":[{"blocking":true,"description":"problema concreto"}]}; ' +
+  "se não houver achados, findings deve ser []. Não edite código de produção nem testes e não faça commits.";
+
+// Alias de modelo do Claude não serve para outro host; um modelo escolhido para o host fica.
+const CLAUDE_MODEL = /^(sonnet|opus|haiku|fable)$|claude/i;
+
+// Ajusta a config ao host. Numa config nova (`fresh`) aplica o perfil inteiro do host. Numa config
+// existente só muda o que o host exige para funcionar e devolve a lista do que mudou — jobs de
+// post_verify, gate e modelo que o usuário escolheu e o host aceita ficam como estão.
+function applyAgentProfile(perfil: PerfilJson, selectedAgent: string, fresh: boolean): string[] {
+  const changes: string[] = [];
+  if (perfil.agent !== selectedAgent) changes.push(`agent: ${String(perfil.agent ?? "claude")} → ${selectedAgent}`);
+  perfil.agent = selectedAgent;
+  if (selectedAgent === "claude") return changes;
+
+  const implementer = (perfil.implementer ??= {}) as Record<string, unknown>;
+  if (typeof implementer.model === "string" && (fresh || CLAUDE_MODEL.test(implementer.model))) {
+    changes.push(`implementer.model removido (${implementer.model} é do Claude)`);
+    delete implementer.model;
+  }
+  if (!HOSTS[selectedAgent as AgentName].reuseSession && implementer.reuse_session !== false) {
+    implementer.reuse_session = false;
+    changes.push("implementer.reuse_session: false");
+  }
+  const wt = (perfil.worktree ??= {}) as { copy_paths?: string[] };
+  if ((wt.copy_paths ?? []).includes(".claude/settings.json")) {
+    wt.copy_paths = (wt.copy_paths ?? []).filter((entry) => entry !== ".claude/settings.json");
+    changes.push("worktree.copy_paths sem .claude/settings.json");
+  }
+  // Sem o hook de projeto dentro do worktree, a fase roda lá sem enforcement nenhum.
+  const hookFile = HOSTS[selectedAgent as AgentName].hookFile;
+  if (hookFile && !(wt.copy_paths ?? []).includes(hookFile)) {
+    wt.copy_paths = [...(wt.copy_paths ?? []), hookFile];
+    changes.push(`worktree.copy_paths + ${hookFile}`);
+  }
+
+  const pv = (perfil.post_verify ?? {}) as Record<string, unknown>;
+  const jobs = (fresh ? [] : ((pv.jobs ?? []) as PostVerifyJob[])).filter(
+    (job) => !job.plugin_dirs?.length && !job.add_dirs?.length
+  );
+  const dropped = ((pv.jobs ?? []) as PostVerifyJob[]).length - jobs.length;
+  if (!fresh && dropped > 0) changes.push(`post_verify: ${dropped} job(s) com plugin_dirs/add_dirs do Claude removido(s)`);
+  if (jobs.length > 0) {
+    perfil.post_verify = { ...pv, require_quiz_pass: false, jobs };
+  } else {
+    perfil.post_verify = {
+      ...(fresh ? {} : pv),
+      enabled: true,
+      gate: fresh ? "block" : (pv.gate ?? "block"),
+      require_quiz_pass: false,
+      jobs: [{ id: "code_review", prompt: REVIEW_PROMPT }],
+    };
+    if (!fresh) changes.push("post_verify: job code_review autocontido adicionado");
+  }
+  return changes;
+}
+
+function hookCommand(host: HookHost): string {
+  const guard = HOOK_GUARD.startsWith(os.homedir()) ? HOOK_GUARD.replace(os.homedir(), "$HOME") : HOOK_GUARD;
+  return host === "claude" ? `"${guard}"` : `SPEC_HARNESS_HOOK_HOST=${host} "${guard}"`;
+}
+
+function ensureCursorHooks(): "criado" | "atualizado" | "já presente" {
+  const settingsPath = path.join(REPO_ROOT, ".cursor", "hooks.json");
+  const command = hookCommand("cursor");
+  const current: { version: number; hooks: Record<string, Array<{ command?: string; failClosed?: boolean }>> } =
+    fs.existsSync(settingsPath)
+      ? (JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as {
+          version: number;
+          hooks: Record<string, Array<{ command?: string; failClosed?: boolean }>>;
+        })
+      : { version: 1, hooks: {} };
+  current.version = 1;
+  current.hooks ??= {};
+  let changed = !fs.existsSync(settingsPath);
+  // afterFileEdit roda depois da escrita e não bloqueia; versões anteriores instalavam a guarda nele.
+  const stale = current.hooks.afterFileEdit;
+  if (stale?.some((hook) => /hook-guard\.sh/.test(hook.command ?? ""))) {
+    current.hooks.afterFileEdit = stale.filter((hook) => !/hook-guard\.sh/.test(hook.command ?? ""));
+    if (current.hooks.afterFileEdit.length === 0) delete current.hooks.afterFileEdit;
+    changed = true;
+  }
+  for (const event of CURSOR_HOOK_EVENTS) {
+    const list = current.hooks[event] ?? [];
+    const existing = list.find((hook) => /hook-guard\.sh/.test(hook.command ?? ""));
+    if (!existing) {
+      list.push({ command, failClosed: true });
+      changed = true;
+    } else if (existing.command !== command || existing.failClosed !== true) {
+      existing.command = command;
+      existing.failClosed = true;
+      changed = true;
+    }
+    current.hooks[event] = list;
+  }
+  if (!changed) return "já presente";
+  const status = fs.existsSync(settingsPath) ? "atualizado" : "criado";
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2) + "\n", "utf-8");
+  return status;
+}
+
+function installCursorSkills(): void {
+  const srcRoot = path.join(HARNESS_DIR, "..", "skills");
+  const destRoot = path.join(REPO_ROOT, ".cursor", "skills");
+  fs.mkdirSync(destRoot, { recursive: true });
+  for (const name of PLUGIN_SKILLS) {
+    const src = path.join(srcRoot, name);
+    const dest = path.join(destRoot, name);
+    if (!fs.existsSync(src)) die(`skill ausente no plugin: ${src}`);
+    try {
+      const stat = fs.lstatSync(dest);
+      if (stat.isSymbolicLink() && fs.readlinkSync(dest) === src) {
+        console.log(`  skill ${name}: já ligada`);
+        continue;
+      }
+      console.log(`  skill ${name}: já existe em .cursor/skills — não substituí`);
+      continue;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    fs.symlinkSync(src, dest, "dir");
+    console.log(`  skill ${name}: .cursor/skills/${name}`);
+  }
+}
+
+function ensureAntigravityHooks(): "criado" | "atualizado" | "já presente" {
+  const settingsPath = path.join(REPO_ROOT, ".agents", "hooks.json");
+  const command = hookCommand("antigravity");
+  const entry = {
+    PreToolUse: [
+      {
+        matcher:
+          "view_file|write_to_file|replace_file_content|multi_replace_file_content|grep_search|find_by_name|list_dir|run_command",
+        hooks: [{ type: "command", command, timeout: 15 }],
+      },
+    ],
+  };
+  const current: Record<string, unknown> = fs.existsSync(settingsPath)
+    ? (JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>)
+    : {};
+  if (JSON.stringify(current["spec-harness-path-scope"]) === JSON.stringify(entry)) return "já presente";
+  const status = fs.existsSync(settingsPath) ? "atualizado" : "criado";
+  current["spec-harness-path-scope"] = entry;
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2) + "\n", "utf-8");
+  return status;
+}
+
 function cmdInitRepo(args: string[]): void {
   const force = args.includes("--force");
   const agentIndex = args.indexOf("--agent");
   const selectedAgent = agentIndex >= 0 ? args[agentIndex + 1] : process.env.SPEC_HARNESS_AGENT ?? "claude";
-  if (!["claude", "codex"].includes(selectedAgent)) die("init-repo --agent deve ser claude ou codex");
+  if (!isAgentName(selectedAgent)) {
+    die("init-repo --agent deve ser claude, codex, cursor ou antigravity");
+  }
   const template = path.join(HARNESS_DIR, "templates", "harness.config.template.json");
   if (!fs.existsSync(template)) die(`template não encontrado: ${template}`);
 
@@ -3159,23 +3389,24 @@ function cmdInitRepo(args: string[]): void {
   const jaExiste = fs.existsSync(dest);
 
   if (jaExiste && !force) {
-    console.log(`Config já existe: ${path.relative(REPO_ROOT, dest)} (use --force para regerar a partir da detecção).`);
+    if (agentIndex >= 0) {
+      const cfg = JSON.parse(fs.readFileSync(dest, "utf-8")) as PerfilJson;
+      const changes = applyAgentProfile(cfg, selectedAgent, false);
+      if (changes.length > 0) fs.writeFileSync(dest, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+      console.log(
+        `Config já existe: ${path.relative(REPO_ROOT, dest)}. ` +
+          (changes.length > 0 ? `Ajustes exigidos por ${selectedAgent}:` : `Nada a ajustar para ${selectedAgent}.`)
+      );
+      for (const change of changes) console.log(`  ${change}`);
+      console.log("  O resto foi preservado. Use --force para regerar a partir da detecção.");
+    } else {
+      console.log(`Config já existe: ${path.relative(REPO_ROOT, dest)} (use --force para regerar a partir da detecção).`);
+    }
   } else {
     console.log("Detectando o perfil do repositório...");
     const d = detectaPerfil();
     const perfil = aplicaDeteccao(JSON.parse(fs.readFileSync(template, "utf-8")) as PerfilJson, d);
-    perfil.agent = selectedAgent;
-    if (selectedAgent === "codex") {
-      const implementer = perfil.implementer as Record<string, unknown>;
-      delete implementer.model;
-      implementer.reuse_session = false;
-      perfil.post_verify = {
-        enabled: true, gate: "block", require_quiz_pass: false,
-        jobs: [{ id: "code_review", prompt: "Revise git diff {base}...{branch} para a spec {spec}. Leia AGENTS.md. Avalie bugs, contratos e testes. Grave {out}/code-review.json com {\"findings\":[{\"blocking\":true,\"description\":\"problema concreto\"}]}; se não houver achados, findings deve ser []. Não edite código de produção nem testes e não faça commits." }],
-      };
-      const wt = perfil.worktree as { copy_paths?: string[] };
-      wt.copy_paths = (wt.copy_paths ?? []).filter(p => p !== ".claude/settings.json");
-    }
+    applyAgentProfile(perfil, selectedAgent, true);
     fs.mkdirSync(destDir, { recursive: true });
     fs.writeFileSync(dest, JSON.stringify(perfil, null, 2) + "\n", "utf-8");
     console.log(`Config ${jaExiste ? "regerada" : "criada"}: ${path.relative(REPO_ROOT, dest)}`);
@@ -3187,8 +3418,15 @@ function cmdInitRepo(args: string[]): void {
     console.log(`  cognitive_loop: ${d.cognitive_loop_dir ?? "job removido (plugin não encontrado)"}`);
   }
 
-  if (agentProvider() === "codex") {
+  if (selectedAgent === "codex") {
     console.log("Codex: controle de paths por auditoria pós-fase; hook Claude não instalado.");
+  } else if (selectedAgent === "cursor") {
+    console.log(`Hook Cursor: ${ensureCursorHooks()} em .cursor/hooks.json`);
+    installCursorSkills();
+    console.log("O autorun spawna cursor-agent -p no worktree; a sessão do editor também pode implementar a fase.");
+  } else if (selectedAgent === "antigravity") {
+    console.log(`Hook Antigravity: ${ensureAntigravityHooks()} em .agents/hooks.json`);
+    console.log("O plugin (agy plugins install) repete esse hook e publica as skills. Os dois gates decidem igual.");
   } else if (PLUGIN_ROOT && !args.includes("--hook")) {
     console.log(
       "Hook PreToolUse: fornecido pelo plugin (hooks/hooks.json) — nada a registrar neste repo. " +
@@ -3325,14 +3563,79 @@ function diagnostico(): Problema[] {
       add("ERRO", "worktree.copy_paths", "sem '.claude/settings.json' — o hook não roda dentro do worktree e a spec fica sem enforcement de path.");
     }
   }
+  const hookFile = HOSTS[agentProvider()].hookFile;
+  if (agentProvider() !== "claude" && hookFile && !copyPaths.includes(hookFile) && !gitRastreia(hookFile)) {
+    add(
+      "ERRO",
+      "worktree.copy_paths",
+      `sem '${hookFile}' — o hook não existe dentro do worktree e a fase roda lá sem enforcement de path.`
+    );
+  }
   for (const rel of copyPaths) {
     if (!repoTem(rel)) add("AVISO", "worktree.copy_paths", `'${rel}' não existe no repo (será ignorado na cópia).`);
   }
 
   const settingsPath = path.join(REPO_ROOT, ".claude", "settings.json");
-  if (agentProvider() === "codex") {
+  const agent = agentProvider();
+  const cli = HOSTS[agent].cli;
+  if (agent === "codex") {
     add("AVISO", "hook", "Codex usa sandbox workspace-write e auditoria pós-fase; não há bloqueio preventivo de leitura/escrita por packet.");
     if (!temBinario("codex")) add("ERRO", "agent", "CLI codex não está no PATH.");
+  } else if (agent === "cursor") {
+    const cursorHooks = path.join(REPO_ROOT, ".cursor", "hooks.json");
+    const cursorOk = (() => {
+      if (!fs.existsSync(cursorHooks)) return false;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(cursorHooks, "utf-8")) as {
+          hooks?: Record<string, Array<{ command?: string; failClosed?: boolean }>>;
+        };
+        return CURSOR_HOOK_EVENTS.every((event) =>
+          (parsed.hooks?.[event] ?? []).some(
+            (hook) => /hook-guard\.sh/.test(hook.command ?? "") && hook.failClosed === true && (hook.command ?? "").includes("SPEC_HARNESS_HOOK_HOST=cursor")
+          )
+        );
+      } catch {
+        return false;
+      }
+    })();
+    if (!cursorOk) {
+      add("ERRO", "hook", `.cursor/hooks.json sem a guarda failClosed — rode \`${CLI} init-repo --agent cursor\`.`);
+    }
+    for (const name of PLUGIN_SKILLS) {
+      const skill = path.join(REPO_ROOT, ".cursor", "skills", name);
+      if (!fs.existsSync(skill)) add("ERRO", "skills", `skill ausente: .cursor/skills/${name}`);
+    }
+    if (!temBinario("cursor-agent")) {
+      add("ERRO", "agent", "CLI cursor-agent não está no PATH — o autorun e o post_verify spawnam `cursor-agent -p`.");
+    }
+    if (implementerConfig().skip_permissions !== true) {
+      add(
+        "AVISO",
+        "implementer.skip_permissions",
+        "sem --force o cursor-agent -p pode recusar shell sem aprovação, conforme a config do Cursor. " +
+          "O hook failClosed continua negando o que está fora do packet se você ligar."
+      );
+    }
+  } else if (agent === "antigravity") {
+    const workspaceHooks = path.join(REPO_ROOT, ".agents", "hooks.json");
+    const pluginHooks = [
+      path.join(os.homedir(), ".gemini", "config", "plugins", "spec-harness", "hooks.json"),
+      path.join(os.homedir(), ".gemini", "antigravity-cli", "plugins", "spec-harness", "hooks.json"),
+    ];
+    const hooked =
+      (fs.existsSync(workspaceHooks) && fs.readFileSync(workspaceHooks, "utf-8").includes("hook-guard.sh")) ||
+      pluginHooks.some((file) => fs.existsSync(file));
+    if (!hooked) {
+      add("ERRO", "hook", `hook Antigravity ausente — rode \`${CLI} init-repo --agent antigravity\` ou instale o plugin.`);
+    }
+    if (!temBinario("agy")) add("ERRO", "agent", "CLI agy não está no PATH.");
+    if (implementerConfig().skip_permissions !== true) {
+      add(
+        "AVISO",
+        "implementer.skip_permissions",
+        "agy -p nega shell em modo headless até haver grant. Ligue skip_permissions só se o hook do plugin estiver ativo."
+      );
+    }
   } else if (PLUGIN_ROOT && !fs.existsSync(settingsPath)) {
     // Hook do plugin vale em toda sessão; o repo não precisa declarar nada.
   } else if (!fs.existsSync(settingsPath)) {
@@ -3392,11 +3695,15 @@ function diagnostico(): Problema[] {
 
   const pv = cfg.post_verify ?? {};
   if (pv.enabled) {
-    if (!temBinario(agentProvider())) add("ERRO", "post_verify", `CLI ${agentProvider()} não está no PATH.`);
+    if (!cli) {
+      add("AVISO", "post_verify", `${agent} não spawna a revisão headless; o job fica para a sessão do editor.`);
+    } else if (!temBinario(cli)) {
+      add("ERRO", "post_verify", `CLI ${cli} não está no PATH.`);
+    }
     for (const job of pv.jobs ?? []) {
       if (!job.prompt) add("ERRO", `post_verify.${job.id}`, "job sem prompt.");
-      if (agentProvider() === "codex" && (job.plugin_dirs?.length || job.add_dirs?.length)) {
-        add("ERRO", `post_verify.${job.id}`, "Codex exige job autocontido, sem plugin_dirs/add_dirs do Claude.");
+      if (HOSTS[agent].selfContainedJobs && (job.plugin_dirs?.length || job.add_dirs?.length)) {
+        add("ERRO", `post_verify.${job.id}`, `${agent} exige job autocontido, sem plugin_dirs/add_dirs do Claude.`);
       }
       for (const d of [...(job.add_dirs ?? []), ...(job.plugin_dirs ?? [])]) {
         if (!fs.existsSync(d)) add("ERRO", `post_verify.${job.id}`, `diretório declarado não existe: ${d}`);
@@ -3420,7 +3727,7 @@ function diagnostico(): Problema[] {
   for (const fase of ["red", "green"]) {
     if (!impl?.prompts?.[fase]) add("ERRO", `implementer.prompts.${fase}`, "ausente — o autorun não teria o que mandar para a sessão da fase.");
   }
-  if (impl?.reuse_session !== false && !impl?.prompts?.retomada) {
+  if (impl?.reuse_session !== false && HOSTS[agent].reuseSession && !impl?.prompts?.retomada) {
     add(
       "AVISO",
       "implementer.prompts.retomada",

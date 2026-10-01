@@ -18,6 +18,10 @@
   },
   "include": [
     "harness.ts",
-    "codex-runner.ts"
+    "codex-runner.ts",
+    "hook-decision.ts",
+    "agy-runner.ts",
+    "cursor-runner.ts",
+    "headless.ts"
   ]
 }

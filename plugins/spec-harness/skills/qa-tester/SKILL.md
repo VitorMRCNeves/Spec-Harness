@@ -7,6 +7,10 @@ allowed-tools: [Read, Glob, Grep, Bash, Write, AskUserQuestion, Skill]
 
 # QA Manual com Playwright
 
+## Host
+
+Se o agente atual for Cursor, leia `../../CURSOR.md`. Se for a Antigravity CLI, leia `../../ANTIGRAVITY.md`. Nomes como `Skill` e `AskUserQuestion` neste documento são papéis do Claude; use a ferramenta nativa equivalente.
+
 Ponte entre "os testes automatizados passam" e "alguém clicou e confirmou que funciona": abre a
 tela de verdade, executa os cenários, tira print de cada estado relevante e escreve um relatório
 que um colega sem contexto de código consegue seguir para testar manualmente.
